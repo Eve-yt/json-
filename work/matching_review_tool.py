@@ -1705,6 +1705,17 @@ HTML = r"""
     .batch-summary b { color:var(--ink); }
     .batch-table-wrap { max-height:300px; overflow:auto; }
     .batch-table th, .batch-table td { font-size:12px; padding:8px; }
+    .dataset-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .dataset-actions button { width:auto; }
+    .dataset-current { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:11px 12px; margin-bottom:12px; border:1px solid var(--line); border-radius:8px; background:var(--blue-soft); }
+    .dataset-current-title { font-weight:800; }
+    .dataset-current-meta { color:var(--muted); font-size:12px; margin-top:4px; word-break:break-all; }
+    .json-preview { border:1px solid var(--line); border-radius:8px; background:var(--surface); overflow:hidden; }
+    .json-preview-head { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:10px 12px; border-bottom:1px solid var(--line); }
+    .json-preview-actions { display:flex; gap:8px; flex-wrap:wrap; }
+    .json-preview-actions button { width:auto; }
+    .json-preview-meta { padding:8px 12px; color:var(--muted); font-size:12px; border-bottom:1px solid var(--line); word-break:break-all; }
+    .json-preview pre { margin:0; padding:12px; max-height:360px; overflow:auto; background:var(--soft); font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
     label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
     input, select, button { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; background:var(--surface); color:var(--ink); font-size:14px; }
     button { cursor:pointer; background:var(--blue); color:#fff; border-color:var(--blue); font-weight:600; }
@@ -2400,12 +2411,19 @@ HTML = r"""
           <button id="toggleModuleMenu" class="module-menu-toggle" title="收起菜单" aria-label="收起菜单" aria-expanded="true" onclick="toggleModuleMenu()">‹</button>
         </div>
         <button id="module-annotation" class="module-tab active" onclick="setModule('annotation')"><span class="module-icon">✎</span><span class="module-label">规则标准</span></button>
+        <button id="module-data" class="module-tab" onclick="setModule('data')"><span class="module-icon">⇣</span><span class="module-label">数据获取</span></button>
         <button id="module-workbench" class="module-tab" onclick="setModule('workbench')"><span class="module-icon">▦</span><span class="module-label">复核工作台</span></button>
         <button id="module-stats" class="module-tab" onclick="setModule('stats')"><span class="module-icon">▤</span><span class="module-label">专项统计</span></button>
         <button id="module-history" class="module-tab" onclick="setModule('history')"><span class="module-icon">↻</span><span class="module-label">比对历史</span></button>
       </nav>
       <div class="module-content">
-    <section id="workbenchModule" class="module-panel hide">
+    <section id="dataModule" class="module-panel hide">
+      <div class="module-heading">
+        <div>
+          <h2>数据获取</h2>
+          <p>统一准备 JSON/TXT 和金标准 Excel；可以手工上传、接口拉取，也可以批量测试。</p>
+        </div>
+      </div>
       <section class="source-panel">
         <div class="source-tabs" aria-label="模型结果来源">
           <button id="source-upload" class="active" onclick="setModelSource('upload')">上传 JSON/TXT</button>
@@ -2414,12 +2432,14 @@ HTML = r"""
         </div>
         <div id="uploadSourcePanel">
           <label>上传 JSON / TXT</label>
-          <input id="jsonFile" type="file" accept=".json,.txt,application/json,text/plain" onchange="clearFetchedModelResult(); updateFileReadyState()">
+          <input id="jsonFile" type="file" accept=".json,.txt,application/json,text/plain" onchange="previewUploadedJson()">
+          <div class="dataset-actions" style="margin-top:10px"><button onclick="useCurrentDataset()">使用这组数据复核</button></div>
         </div>
         <div id="apiSourcePanel" class="api-source-grid hide">
           <div><label>接口地址</label><input id="apiBaseUrl" placeholder="模型结果接口地址"></div>
           <div><label>caseId</label><input id="apiCaseId" placeholder="输入 caseId" oninput="updateFileReadyState()"></div>
           <div><button class="secondary" onclick="fetchModelResult()">拉取模型结果</button></div>
+          <div class="dataset-actions"><button onclick="useCurrentDataset()">使用接口 JSON + Excel 复核</button></div>
         </div>
         <div id="batchSourcePanel" class="batch-grid hide">
           <div><label>批量模式</label><select id="batchExcelMode" onchange="updateBatchModeUI()"><option value="shared">共用一个 Excel</option><option value="mapped">每个 case 对应不同 Excel</option></select></div>
@@ -2430,13 +2450,23 @@ HTML = r"""
           <div id="batchExcelFilesWrap" class="hide"><label>批量 Excel 文件</label><input id="batchExcelFiles" type="file" multiple accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
           <div><button onclick="startBatchTest()">开始批量测试</button></div>
         </div>
+        <div id="singleExcelWrap">
+          <label>金标准 Excel</label>
+          <input id="excelFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onchange="updateFileReadyState()">
+        </div>
       </section>
-      <div class="controls">
-        <div><label>上传 Excel</label><input id="excelFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onchange="updateFileReadyState()"></div>
-        <div><label>匹配阈值</label><input id="matchThreshold" type="number" min="0" max="1" step="0.01" value="0.67"></div>
-        <div><label>复核阈值</label><input id="reviewThreshold" type="number" min="0" max="1" step="0.01" value="0.82"></div>
-        <div><button id="analyzeButton" disabled onclick="analyze()">分析</button></div>
-      </div>
+      <section id="jsonPreview" class="json-preview hide">
+        <div class="json-preview-head">
+          <div class="batch-result-title">JSON 结果预览</div>
+          <div class="json-preview-actions">
+            <button class="secondary mini" onclick="copyPreviewJson()">复制 JSON</button>
+            <button class="secondary mini" onclick="downloadPreviewJson()">下载 JSON</button>
+            <button class="secondary mini" onclick="useCurrentDataset()">用此 JSON 去复核</button>
+          </div>
+        </div>
+        <div class="json-preview-meta" id="jsonPreviewMeta">未拉取结果</div>
+        <pre id="jsonPreviewBody"></pre>
+      </section>
       <section id="batchResult" class="batch-result hide">
         <div class="batch-result-head">
           <div>
@@ -2455,6 +2485,20 @@ HTML = r"""
           </table>
         </div>
       </section>
+    </section>
+    <section id="workbenchModule" class="module-panel hide">
+      <div class="dataset-current">
+        <div>
+          <div class="dataset-current-title">当前复核数据</div>
+          <div class="dataset-current-meta" id="currentDatasetInfo">请先到“数据获取”准备 JSON/TXT 和 Excel。</div>
+        </div>
+        <button class="secondary" onclick="setModule('data')">返回数据获取</button>
+      </div>
+      <div class="controls">
+        <div><label>匹配阈值</label><input id="matchThreshold" type="number" min="0" max="1" step="0.01" value="0.67"></div>
+        <div><label>复核阈值</label><input id="reviewThreshold" type="number" min="0" max="1" step="0.01" value="0.82"></div>
+        <div><button id="analyzeButton" disabled onclick="analyze()">分析</button></div>
+      </div>
       <section class="cards hide" id="cards"></section>
       <div class="toolbar">
         <div class="toolbar-actions">
@@ -2492,8 +2536,8 @@ HTML = r"""
       </div>
       <section id="analysisEmpty" class="analysis-empty">
         <div class="analysis-empty-kicker">准备开始</div>
-        <h2>请先上传两份文件</h2>
-        <p>选择 JSON / TXT 和 Excel 后点击“分析”，系统才会生成匹配候选、统计结果和复核表格。</p>
+        <h2>请先准备复核数据</h2>
+        <p>到“数据获取”上传 JSON/TXT 与 Excel，或拉取接口 JSON 后，再回到这里点击“分析”。</p>
       </section>
       <div class="workspace hide" id="reviewWorkspace">
         <aside class="sidebar">
@@ -2881,6 +2925,7 @@ HTML = r"""
       document.getElementById('uploadSourcePanel')?.classList.toggle('hide', modelResultSource !== 'upload');
       document.getElementById('apiSourcePanel')?.classList.toggle('hide', modelResultSource !== 'api');
       document.getElementById('batchSourcePanel')?.classList.toggle('hide', modelResultSource !== 'batch');
+      updateBatchModeUI();
       const button = document.getElementById('analyzeButton');
       if (button) button.textContent = modelResultSource === 'api' ? '分析接口结果' : '分析';
       if (notify && modelResultSource === 'batch') showToast('批量测试会逐个 caseId 拉取接口并生成汇总。', 'info', 2400);
@@ -2900,6 +2945,7 @@ HTML = r"""
       const ready = jsonReady && excelReady;
       const button = document.getElementById('analyzeButton');
       if (button) button.disabled = !ready || Boolean(activeAnalysisJobId);
+      refreshWorkbenchDatasetInfo();
       if (!analysis) {
         const needModel = modelResultSource === 'api' ? '请先拉取接口模型结果' : '请先上传 JSON / TXT';
         document.getElementById('status').textContent = ready ? '数据已就绪，可以开始分析' : `${needModel}，并上传 Excel 文件`;
@@ -2910,12 +2956,13 @@ HTML = r"""
     }
     function setModule(name) {
       activeModule = name;
-      for (const moduleName of ['workbench', 'annotation', 'stats', 'history']) {
+      for (const moduleName of ['workbench', 'annotation', 'data', 'stats', 'history']) {
         const panel = document.getElementById(`${moduleName}Module`);
         const tab = document.getElementById(`module-${moduleName}`);
         if (panel) panel.classList.toggle('hide', moduleName !== name);
         if (tab) tab.classList.toggle('active', moduleName === name);
       }
+      if (name === 'workbench') refreshWorkbenchDatasetInfo();
       if (name === 'stats') renderStatsModule();
       if (name === 'history') loadHistoryList();
     }
@@ -3486,6 +3533,7 @@ HTML = r"""
       try {
         const result = await post('/api/model-result/fetch', {baseUrl, caseId});
         fetchedModelResult = result;
+        previewJsonResult(result);
         updateFileReadyState();
         showSuccess(`接口拉取成功：caseId=${result.caseId}，共 ${result.count} 条规则。`);
         document.getElementById('status').textContent = `接口结果已就绪：${result.count} 条规则`;
@@ -3506,6 +3554,90 @@ HTML = r"""
       const mapped = document.getElementById('batchExcelMode')?.value === 'mapped';
       document.getElementById('batchMappingWrap')?.classList.toggle('hide', !mapped);
       document.getElementById('batchExcelFilesWrap')?.classList.toggle('hide', !mapped);
+      document.getElementById('singleExcelWrap')?.classList.toggle('hide', modelResultSource === 'batch' && mapped);
+      updateFileReadyState();
+    }
+    function currentDatasetLabel() {
+      const excelFile = document.getElementById('excelFile')?.files?.[0];
+      if (modelResultSource === 'api') {
+        const apiName = fetchedModelResult ? `接口 caseId=${fetchedModelResult.caseId}（${fetchedModelResult.count || 0} 条规则）` : '接口 JSON 未拉取';
+        return `${apiName} / Excel：${excelFile ? excelFile.name : '未上传'}`;
+      }
+      if (modelResultSource === 'batch') {
+        return '批量测试结果在“数据获取”模块中查看；单案复核请点批量表里的“查看明细”。';
+      }
+      const jsonFile = document.getElementById('jsonFile')?.files?.[0];
+      return `手工上传 JSON：${jsonFile ? jsonFile.name : '未上传'} / Excel：${excelFile ? excelFile.name : '未上传'}`;
+    }
+    function refreshWorkbenchDatasetInfo() {
+      const target = document.getElementById('currentDatasetInfo');
+      if (target) target.textContent = currentDatasetLabel();
+    }
+    function useCurrentDataset() {
+      if (modelResultSource === 'batch') {
+        showToast('批量测试不直接进入复核工作台；请在批量结果表中选择某个 case 查看明细。', 'info', 3600);
+        return;
+      }
+      if (!modelResultReady() || !document.getElementById('excelFile')?.files?.[0]) {
+        updateFileReadyState();
+        showFailure('请先准备模型 JSON/TXT，并上传金标准 Excel。');
+        return;
+      }
+      refreshWorkbenchDatasetInfo();
+      setModule('workbench');
+      showSuccess('数据已送入复核工作台，可以开始分析。');
+    }
+    function previewJsonResult(result) {
+      const wrap = document.getElementById('jsonPreview');
+      const meta = document.getElementById('jsonPreviewMeta');
+      const body = document.getElementById('jsonPreviewBody');
+      if (!wrap || !meta || !body) return;
+      wrap.classList.remove('hide');
+      meta.textContent = `caseId=${result.caseId || ''}；规则数量=${result.count || 0}；URL=${result.url || ''}`;
+      body.textContent = JSON.stringify(result.content || [], null, 2);
+    }
+    async function previewUploadedJson() {
+      clearFetchedModelResult();
+      const file = document.getElementById('jsonFile')?.files?.[0];
+      const wrap = document.getElementById('jsonPreview');
+      const meta = document.getElementById('jsonPreviewMeta');
+      const body = document.getElementById('jsonPreviewBody');
+      if (!file || !wrap || !meta || !body) {
+        updateFileReadyState();
+        return;
+      }
+      const content = await readTextFile(file);
+      let display = content;
+      let countText = '未解析';
+      try {
+        const parsed = JSON.parse(content);
+        const items = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.data) ? parsed.data : null);
+        countText = items ? `${items.length} 条` : 'JSON对象';
+        display = JSON.stringify(parsed, null, 2);
+      } catch (_) {
+        countText = '文本文件';
+      }
+      wrap.classList.remove('hide');
+      meta.textContent = `上传文件=${file.name}；内容=${countText}`;
+      body.textContent = display;
+      updateFileReadyState();
+    }
+    async function copyPreviewJson() {
+      const content = document.getElementById('jsonPreviewBody')?.textContent || '';
+      if (!content) { showFailure('没有可复制的 JSON。'); return; }
+      await navigator.clipboard.writeText(content);
+      showSuccess('JSON 已复制。');
+    }
+    function downloadPreviewJson() {
+      const content = document.getElementById('jsonPreviewBody')?.textContent || '';
+      if (!content) { showFailure('没有可下载的 JSON。'); return; }
+      const name = fetchedModelResult?.caseId ? `接口结果-${fetchedModelResult.caseId}.json` : '接口结果.json';
+      const blob = new Blob([content], {type:'application/json;charset=utf-8'});
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = name;
+      link.click();
+      URL.revokeObjectURL(link.href);
     }
     async function readBatchMapping() {
       const file = document.getElementById('batchMappingFile')?.files?.[0];
