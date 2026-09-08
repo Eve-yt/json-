@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+node_modules/
+work/node_modules
+
+# Runtime data and user-provided review materials
+work/uploads/
+work/history/
+outputs/
+work/server.log
+work/server.pid
+
+# Generated verification artifacts
+work/verify*.xlsx
+work/verify*.png
+work/*-preview.png
+
+# Local development backups and probes
+work/matching_review_tool.before-*.py
+work/inspect_reference.mjs
+work/verify_dimension_export.mjs
+work/sheet_inspect/
