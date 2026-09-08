@@ -1715,7 +1715,7 @@ HTML = r"""
     .json-preview-actions { display:flex; gap:8px; flex-wrap:wrap; }
     .json-preview-actions button { width:auto; }
     .json-preview-meta { padding:8px 12px; color:var(--muted); font-size:12px; border-bottom:1px solid var(--line); word-break:break-all; }
-    .json-preview pre { margin:0; padding:12px; max-height:360px; overflow:auto; background:var(--soft); font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+    .json-preview pre { margin:0; padding:12px; height:calc(100vh - 390px); min-height:520px; max-height:none; overflow:auto; background:var(--soft); font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
     label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
     input, select, button { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; background:var(--surface); color:var(--ink); font-size:14px; }
     button { cursor:pointer; background:var(--blue); color:#fff; border-color:var(--blue); font-weight:600; }
@@ -1774,7 +1774,6 @@ HTML = r"""
     .history-save button { width:auto; white-space:nowrap; min-height:38px; }
     .history-toolbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
     .history-toolbar button { width:auto; }
-    .history-save-button { width:auto; min-height:34px; padding:7px 14px; font-size:13px; white-space:nowrap; margin-left:auto; }
     .history-list { display:grid; gap:10px; }
     .history-item { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
     .history-item-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
@@ -2581,6 +2580,7 @@ HTML = r"""
               <button id="saveGoldButton" class="secondary" disabled onclick="saveGoldStandards()">保存金标准修改</button>
               <button onclick="submitCurrentMaterial()">提交当前文件</button>
               <button class="secondary" onclick="jumpNextPendingMaterial()">下一组待复核</button>
+              <button class="secondary" onclick="openHistorySaveDialog()">保存当前比对</button>
             </div>
           </div>
           <div class="gold-edit-status" id="goldEditStatus">金标准未修改</div>
@@ -2715,7 +2715,6 @@ HTML = r"""
         <button class="secondary" onclick="clearHistorySelection()">清空选择</button>
         <button id="exportHistoryButton" onclick="exportSelectedHistories()" disabled>导出已选（0）</button>
         <span class="status" id="historyStatus"></span>
-        <button class="history-save-button" onclick="openHistorySaveDialog()">保存当前比对</button>
       </div>
       <div id="historyList" class="history-list"></div>
       <div id="historyPagination" class="history-pagination hide"></div>
@@ -2917,8 +2916,14 @@ HTML = r"""
       updateBatchModeUI();
     }
     function setModelSource(source, notify=true) {
-      modelResultSource = ['upload', 'api', 'batch'].includes(source) ? source : 'upload';
+      const nextSource = ['upload', 'api', 'batch'].includes(source) ? source : 'upload';
+      const changed = nextSource !== modelResultSource;
+      modelResultSource = nextSource;
       localStorage.setItem('matchingToolModelSource', modelResultSource);
+      if (changed) {
+        clearFetchedModelResult();
+        clearJsonPreview();
+      }
       for (const name of ['upload', 'api', 'batch']) {
         document.getElementById(`source-${name}`)?.classList.toggle('active', modelResultSource === name);
       }
@@ -2933,6 +2938,14 @@ HTML = r"""
     }
     function clearFetchedModelResult() {
       fetchedModelResult = null;
+    }
+    function clearJsonPreview() {
+      const wrap = document.getElementById('jsonPreview');
+      const meta = document.getElementById('jsonPreviewMeta');
+      const body = document.getElementById('jsonPreviewBody');
+      if (wrap) wrap.classList.add('hide');
+      if (meta) meta.textContent = '未拉取结果';
+      if (body) body.textContent = '';
     }
     function modelResultReady() {
       if (modelResultSource === 'upload') return Boolean(document.getElementById('jsonFile')?.files?.length);
