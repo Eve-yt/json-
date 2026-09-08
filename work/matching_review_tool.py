@@ -3,9 +3,12 @@ import base64
 import copy
 import json
 import re
+import sqlite3
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -24,6 +27,7 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 UPLOAD_DIR = BASE_DIR / "work" / "uploads"
 HISTORY_DIR = BASE_DIR / "work" / "history"
 HISTORY_INDEX = HISTORY_DIR / "index.json"
+DB_PATH = BASE_DIR / "work" / "review_tool.db"
 DEFAULT_OUTPUT = OUTPUT_DIR / "自办违法测2_复核后标注统计.xlsx"
 DEFAULT_ERROR_REASON_OUTPUT = OUTPUT_DIR / "错误原因明细.xlsx"
 DEFAULT_HISTORY_OUTPUT = OUTPUT_DIR / "比对历史导出.xlsx"
@@ -31,6 +35,10 @@ RULE_ANNOTATION_OUTPUT_PREFIX = "规则金标准标注"
 ANALYSIS_JOBS = {}
 ANALYSIS_JOBS_LOCK = threading.Lock()
 ANALYSIS_JOB_TTL_SECONDS = 30 * 60
+BATCH_JOBS = {}
+BATCH_JOBS_LOCK = threading.Lock()
+BATCH_JOB_TTL_SECONDS = 12 * 60 * 60
+DEFAULT_MODEL_RESULT_API = "http://120.195.114.115:5025/intelli-judge/cpc/procedure/rule/result"
 CATEGORY_NAMES = ("签名", "日期", "捺印", "印章", "其他")
 ERROR_REASON_HEADERS = (
     "错误原因", "来源文件", "材料类型", "对应材料名称",
@@ -117,6 +125,130 @@ def normalize_result_bool(value):
     return None
 
 
+def db_connect():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_app_db():
+    with db_connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_cache (
+                cache_key TEXT PRIMARY KEY,
+                base_url TEXT NOT NULL,
+                case_id TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                rule_count INTEGER NOT NULL,
+                content TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS batch_jobs (
+                id TEXT PRIMARY KEY,
+                base_url TEXT NOT NULL,
+                excel_file_name TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS batch_cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                case_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                message TEXT NOT NULL,
+                json_rules INTEGER,
+                excel_rows INTEGER,
+                review_rows INTEGER,
+                missed_rows INTEGER,
+                model_triggered INTEGER,
+                model_correct INTEGER,
+                expected_total INTEGER,
+                expected_triggered INTEGER,
+                error_total INTEGER,
+                error_recalled INTEGER,
+                trigger_rate REAL,
+                recall REAL,
+                accuracy REAL,
+                analysis_path TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def now_text():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def model_result_url(base_url, case_id):
+    base_url = str(base_url or "").strip()
+    case_id = str(case_id or "").strip()
+    if not base_url:
+        raise ValueError("请填写接口地址。")
+    if not case_id:
+        raise ValueError("请填写 caseId。")
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("接口地址必须是 http 或 https。")
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    query["caseId"] = [case_id]
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query, doseq=True)))
+
+
+def extract_model_result_items(body):
+    data = body
+    if isinstance(body, dict) and "data" in body:
+        code = body.get("code")
+        if code not in (None, 0, "0"):
+            raise ValueError(str(body.get("msg") or body.get("message") or f"接口返回 code={code}"))
+        data = body.get("data")
+    if not isinstance(data, list):
+        raise ValueError("接口返回格式不正确：未找到 data 数组。")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def fetch_model_result_from_api(base_url, case_id, timeout=20):
+    url = model_result_url(base_url, case_id)
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            raw = res.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"接口请求失败：HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"接口请求失败：{exc.reason}") from exc
+    try:
+        body = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError("接口返回不是合法 JSON。") from exc
+    items = extract_model_result_items(body)
+    cache_key = f"{base_url.strip()}::{case_id.strip()}"
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO api_cache(cache_key, base_url, case_id, fetched_at, rule_count, content)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (cache_key, base_url.strip(), case_id.strip(), now_text(), len(items), json.dumps(items, ensure_ascii=False)),
+        )
+    return {"url": url, "caseId": case_id.strip(), "count": len(items), "content": items}
+
+
 def gold_row_pending(row):
     """A duplicate copy stays outside statistics until both gold-standard fields are confirmed."""
     return bool(row.get("materialCopyPending")) and not (
@@ -159,6 +291,8 @@ def classify_rule(rule_name):
 
 def load_json_candidates(json_path):
     data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        data = data["data"]
     if isinstance(data, list):
         # Newer exports are already flat: each array item is one model detection result.
         # They do not expose a material-copy boundary, so keep one material group per
@@ -1545,6 +1679,22 @@ HTML = r"""
     .header-topline h1 { margin:0; }
     .controls { display:grid; grid-template-columns: minmax(300px, 1.2fr) minmax(260px, 1fr) 96px 96px 100px; gap:10px; align-items:end; margin-bottom:14px; }
     .controls > div { min-width:0; }
+    .source-panel { display:grid; gap:10px; padding:12px; margin-bottom:12px; border:1px solid var(--line); border-radius:8px; background:var(--surface); }
+    .source-tabs { display:flex; gap:6px; flex-wrap:wrap; }
+    .source-tabs button { width:auto; background:var(--soft); color:var(--muted); border-color:var(--line); }
+    .source-tabs button.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+    .api-source-grid { display:grid; grid-template-columns:minmax(260px, 1fr) minmax(170px, 240px) auto; gap:10px; align-items:end; }
+    .batch-grid { display:grid; grid-template-columns:minmax(260px, 1fr) minmax(260px, .8fr) auto auto; gap:10px; align-items:end; }
+    .batch-grid textarea { min-height:82px; resize:vertical; }
+    .batch-result { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--surface); margin:10px 0 14px; }
+    .batch-result-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid var(--line); }
+    .batch-result-title { font-weight:800; }
+    .batch-result-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .batch-result-actions button { width:auto; }
+    .batch-summary { display:flex; flex-wrap:wrap; gap:8px; padding:10px 12px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }
+    .batch-summary b { color:var(--ink); }
+    .batch-table-wrap { max-height:300px; overflow:auto; }
+    .batch-table th, .batch-table td { font-size:12px; padding:8px; }
     label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
     input, select, button { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; background:var(--surface); color:var(--ink); font-size:14px; }
     button { cursor:pointer; background:var(--blue); color:#fff; border-color:var(--blue); font-weight:600; }
@@ -2246,13 +2396,52 @@ HTML = r"""
       </nav>
       <div class="module-content">
     <section id="workbenchModule" class="module-panel hide">
+      <section class="source-panel">
+        <div class="source-tabs" aria-label="模型结果来源">
+          <button id="source-upload" class="active" onclick="setModelSource('upload')">上传 JSON/TXT</button>
+          <button id="source-api" onclick="setModelSource('api')">接口拉取</button>
+          <button id="source-batch" onclick="setModelSource('batch')">批量测试</button>
+        </div>
+        <div id="uploadSourcePanel">
+          <label>上传 JSON / TXT</label>
+          <input id="jsonFile" type="file" accept=".json,.txt,application/json,text/plain" onchange="clearFetchedModelResult(); updateFileReadyState()">
+        </div>
+        <div id="apiSourcePanel" class="api-source-grid hide">
+          <div><label>接口地址</label><input id="apiBaseUrl" placeholder="模型结果接口地址"></div>
+          <div><label>caseId</label><input id="apiCaseId" placeholder="输入 caseId" oninput="updateFileReadyState()"></div>
+          <div><button class="secondary" onclick="fetchModelResult()">拉取模型结果</button></div>
+        </div>
+        <div id="batchSourcePanel" class="batch-grid hide">
+          <div><label>批量接口地址</label><input id="batchBaseUrl" placeholder="模型结果接口地址"></div>
+          <div><label>caseId 列表</label><textarea id="batchCaseIds" placeholder="一行一个 caseId"></textarea></div>
+          <div><label>caseId 文件</label><input id="batchCaseFile" type="file" accept=".txt,.csv,text/plain,text/csv"></div>
+          <div><button onclick="startBatchTest()">开始批量测试</button></div>
+        </div>
+      </section>
       <div class="controls">
-        <div><label>上传 JSON / TXT</label><input id="jsonFile" type="file" accept=".json,.txt,application/json,text/plain" onchange="updateFileReadyState()"></div>
         <div><label>上传 Excel</label><input id="excelFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onchange="updateFileReadyState()"></div>
         <div><label>匹配阈值</label><input id="matchThreshold" type="number" min="0" max="1" step="0.01" value="0.67"></div>
         <div><label>复核阈值</label><input id="reviewThreshold" type="number" min="0" max="1" step="0.01" value="0.82"></div>
         <div><button id="analyzeButton" disabled onclick="analyze()">分析</button></div>
       </div>
+      <section id="batchResult" class="batch-result hide">
+        <div class="batch-result-head">
+          <div>
+            <div class="batch-result-title">批量测试结果</div>
+            <div class="status" id="batchStatus">等待开始</div>
+          </div>
+          <div class="batch-result-actions">
+            <button class="secondary" id="batchExportButton" disabled onclick="exportBatchResult()">导出批量结果</button>
+          </div>
+        </div>
+        <div class="batch-summary" id="batchSummary"></div>
+        <div class="batch-table-wrap">
+          <table class="batch-table">
+            <thead><tr><th>caseId</th><th>状态</th><th>JSON规则</th><th>Excel检测项</th><th>漏检</th><th>触发率</th><th>召回率</th><th>准确率</th><th>操作</th></tr></thead>
+            <tbody id="batchRows"></tbody>
+          </table>
+        </div>
+      </section>
       <section class="cards hide" id="cards"></section>
       <div class="toolbar">
         <div class="toolbar-actions">
@@ -2562,6 +2751,9 @@ HTML = r"""
     let annotationExpandedMaterials = new Set();
     let annotationStatusFilter = 'all';
     let activeAnalysisJobId = '';
+    let modelResultSource = localStorage.getItem('matchingToolModelSource') || 'upload';
+    let fetchedModelResult = null;
+    let activeBatchJobId = '';
     const MATERIAL_PAGE_SIZE = 10;
     const HISTORY_PAGE_SIZE = 5;
     const errorReasonHeaders = ['错误原因', '来源文件', '材料类型', '对应材料名称', '所属阶段', '阶段时间顺序', '规则名称', '特殊条件', '判断规则', '错误场景', '是否触发', '是否正确', '模型是否触发', '模型是否正确', '具体问题内容'];
@@ -2570,6 +2762,7 @@ HTML = r"""
     setMaterialsCollapsed(localStorage.getItem('matchingToolMaterialsCollapsed') === '1');
     setModule('annotation');
     setAnalysisVisibility(false);
+    initModelSourceControls();
     updateFileReadyState();
 
     function escapeHtml(value) {
@@ -2647,14 +2840,52 @@ HTML = r"""
       document.getElementById('exportButton')?.toggleAttribute('disabled', !visible);
       document.getElementById('analysisEmpty')?.classList.toggle('hide', visible);
     }
+    function initModelSourceControls() {
+      const apiDefault = localStorage.getItem('matchingToolApiBaseUrl') || defaults.modelResultApi || '';
+      const batchDefault = localStorage.getItem('matchingToolBatchBaseUrl') || apiDefault;
+      const apiInput = document.getElementById('apiBaseUrl');
+      const batchInput = document.getElementById('batchBaseUrl');
+      if (apiInput) {
+        apiInput.value = apiDefault;
+        apiInput.addEventListener('input', () => localStorage.setItem('matchingToolApiBaseUrl', apiInput.value));
+      }
+      if (batchInput) {
+        batchInput.value = batchDefault;
+        batchInput.addEventListener('input', () => localStorage.setItem('matchingToolBatchBaseUrl', batchInput.value));
+      }
+      setModelSource(modelResultSource, false);
+    }
+    function setModelSource(source, notify=true) {
+      modelResultSource = ['upload', 'api', 'batch'].includes(source) ? source : 'upload';
+      localStorage.setItem('matchingToolModelSource', modelResultSource);
+      for (const name of ['upload', 'api', 'batch']) {
+        document.getElementById(`source-${name}`)?.classList.toggle('active', modelResultSource === name);
+      }
+      document.getElementById('uploadSourcePanel')?.classList.toggle('hide', modelResultSource !== 'upload');
+      document.getElementById('apiSourcePanel')?.classList.toggle('hide', modelResultSource !== 'api');
+      document.getElementById('batchSourcePanel')?.classList.toggle('hide', modelResultSource !== 'batch');
+      const button = document.getElementById('analyzeButton');
+      if (button) button.textContent = modelResultSource === 'api' ? '分析接口结果' : '分析';
+      if (notify && modelResultSource === 'batch') showToast('批量测试会逐个 caseId 拉取接口并生成汇总。', 'info', 2400);
+      updateFileReadyState();
+    }
+    function clearFetchedModelResult() {
+      fetchedModelResult = null;
+    }
+    function modelResultReady() {
+      if (modelResultSource === 'upload') return Boolean(document.getElementById('jsonFile')?.files?.length);
+      if (modelResultSource === 'api') return Boolean(fetchedModelResult && fetchedModelResult.content);
+      return false;
+    }
     function updateFileReadyState() {
-      const jsonReady = Boolean(document.getElementById('jsonFile')?.files?.length);
+      const jsonReady = modelResultReady();
       const excelReady = Boolean(document.getElementById('excelFile')?.files?.length);
       const ready = jsonReady && excelReady;
       const button = document.getElementById('analyzeButton');
       if (button) button.disabled = !ready || Boolean(activeAnalysisJobId);
       if (!analysis) {
-        document.getElementById('status').textContent = ready ? '文件已就绪，可以开始分析' : '请同时上传 JSON / TXT 和 Excel 文件';
+        const needModel = modelResultSource === 'api' ? '请先拉取接口模型结果' : '请先上传 JSON / TXT';
+        document.getElementById('status').textContent = ready ? '数据已就绪，可以开始分析' : `${needModel}，并上传 Excel 文件`;
       }
     }
     function resetMaterialListPage() {
@@ -3170,8 +3401,8 @@ HTML = r"""
     function setAnalyzeBusy(busy) {
       const button = document.getElementById('analyzeButton');
       if (button) {
-        button.disabled = busy || !document.getElementById('jsonFile').files[0] || !document.getElementById('excelFile').files[0];
-        button.textContent = busy ? '分析中' : '分析';
+        button.disabled = busy || !modelResultReady() || !document.getElementById('excelFile').files[0];
+        button.textContent = busy ? '分析中' : (modelResultSource === 'api' ? '分析接口结果' : '分析');
       }
     }
     function setAnalysisProgress(percent, message, visible=true) {
@@ -3231,6 +3462,116 @@ HTML = r"""
         await new Promise(resolve => window.setTimeout(resolve, 400));
       }
     }
+    async function fetchModelResult() {
+      const baseUrl = document.getElementById('apiBaseUrl')?.value || '';
+      const caseId = document.getElementById('apiCaseId')?.value || '';
+      document.getElementById('status').textContent = '正在拉取接口模型结果...';
+      try {
+        const result = await post('/api/model-result/fetch', {baseUrl, caseId});
+        fetchedModelResult = result;
+        updateFileReadyState();
+        showSuccess(`接口拉取成功：caseId=${result.caseId}，共 ${result.count} 条规则。`);
+        document.getElementById('status').textContent = `接口结果已就绪：${result.count} 条规则`;
+      } catch (err) {
+        fetchedModelResult = null;
+        updateFileReadyState();
+        document.getElementById('status').textContent = err.message;
+        showFailure(`接口拉取失败：${err.message}`);
+      }
+    }
+    async function readBatchCaseIds() {
+      const file = document.getElementById('batchCaseFile')?.files?.[0];
+      const typed = document.getElementById('batchCaseIds')?.value || '';
+      const fileText = file ? await readTextFile(file) : '';
+      return [typed, fileText].filter(Boolean).join('\n');
+    }
+    function renderBatchResult(job) {
+      document.getElementById('batchResult')?.classList.remove('hide');
+      const summary = job.summary || {};
+      const statusText = `${job.message || ''}（${job.completed || 0}/${job.total || 0}，成功 ${job.success || 0}，失败 ${job.failed || 0}）`;
+      document.getElementById('batchStatus').textContent = statusText;
+      document.getElementById('batchExportButton').disabled = !job.cases || !job.cases.length;
+      document.getElementById('batchSummary').innerHTML = [
+        `总case <b>${summary.totalCases || 0}</b>`,
+        `成功 <b>${summary.successCases || 0}</b>`,
+        `失败 <b>${summary.failedCases || 0}</b>`,
+        `JSON规则 <b>${summary.jsonRules || 0}</b>`,
+        `Excel检测项 <b>${summary.excelRows || 0}</b>`,
+        `漏检 <b>${summary.missedRows || 0}</b>`,
+        `触发率 <b>${pct(summary.triggerRate || 0)}</b>`,
+        `召回率 <b>${pct(summary.recall || 0)}</b>`,
+        `准确率 <b>${pct(summary.accuracy || 0)}</b>`,
+      ].join('');
+      const rows = job.cases || [];
+      document.getElementById('batchRows').innerHTML = rows.map(item => `
+        <tr>
+          <td>${escapeHtml(item.caseId)}</td>
+          <td>${escapeHtml(item.status || '')}<div class="small">${escapeHtml(item.message || '')}</div></td>
+          <td>${item.jsonRules || 0}</td>
+          <td>${item.excelRows || 0}</td>
+          <td>${item.missedRows || 0}</td>
+          <td>${pct(item.triggerRate || 0)}</td>
+          <td>${pct(item.recall || 0)}</td>
+          <td>${pct(item.accuracy || 0)}</td>
+          <td>${item.status === 'success' ? `<button class="secondary mini" onclick="loadBatchCase('${escapeHtml(item.caseId)}')">查看明细</button>` : '/'}</td>
+        </tr>`).join('') || '<tr><td colspan="9" class="small">暂无批量结果。</td></tr>';
+    }
+    async function waitForBatchJob(jobId) {
+      activeBatchJobId = jobId;
+      window.lastBatchJobId = jobId;
+      while (activeBatchJobId === jobId) {
+        const job = await getJson(`/api/batch/status?id=${encodeURIComponent(jobId)}`);
+        renderBatchResult(job);
+        if (['done', 'done_with_errors', 'error'].includes(job.status)) {
+          activeBatchJobId = '';
+          showToast(job.message || '批量测试完成。', job.failed ? 'info' : 'success', 4200);
+          return;
+        }
+        await new Promise(resolve => window.setTimeout(resolve, 900));
+      }
+    }
+    async function startBatchTest() {
+      const excelFile = document.getElementById('excelFile')?.files?.[0];
+      if (!excelFile) { showFailure('请先上传 Excel 文件。'); return; }
+      try {
+        const payload = {
+          baseUrl: document.getElementById('batchBaseUrl')?.value || defaults.modelResultApi,
+          caseIds: await readBatchCaseIds(),
+          matchThreshold: Number(document.getElementById('matchThreshold').value),
+          reviewThreshold: Number(document.getElementById('reviewThreshold').value),
+          excelUpload: { name: excelFile.name, base64: await readBase64File(excelFile) }
+        };
+        document.getElementById('batchResult')?.classList.remove('hide');
+        document.getElementById('batchStatus').textContent = '正在启动批量任务...';
+        const started = await post('/api/batch/start', payload);
+        await waitForBatchJob(started.jobId);
+      } catch (err) {
+        activeBatchJobId = '';
+        document.getElementById('batchStatus').textContent = err.message;
+        showFailure(`批量测试失败：${err.message}`);
+      }
+    }
+    async function loadBatchCase(caseId) {
+      if (!activeBatchJobId && !document.getElementById('batchResult')) return;
+      try {
+        const jobId = activeBatchJobId || window.lastBatchJobId;
+        const result = await getJson(`/api/batch/case?id=${encodeURIComponent(jobId)}&caseId=${encodeURIComponent(caseId)}`);
+        finishAnalysis(result);
+        showSuccess(`已载入 caseId=${caseId} 的分析明细。`);
+      } catch (err) {
+        showFailure(`载入明细失败：${err.message}`);
+      }
+    }
+    async function exportBatchResult() {
+      const jobId = activeBatchJobId || window.lastBatchJobId;
+      if (!jobId) { showFailure('没有可导出的批量任务。'); return; }
+      try {
+        const result = await post('/api/batch/export', {jobId});
+        showSuccess(`批量结果已导出：${result.outputPath}`);
+      } catch (err) {
+        showFailure(`导出批量结果失败：${err.message}`);
+      }
+    }
     async function analyze() {
       setAnalyzeBusy(true);
       setAnalysisProgress(0, '正在准备分析...', true);
@@ -3242,13 +3583,20 @@ HTML = r"""
         };
         const jsonFile = document.getElementById('jsonFile').files[0];
         const excelFile = document.getElementById('excelFile').files[0];
-        if (!jsonFile || !excelFile) {
+        if (!modelResultReady() || !excelFile) {
           updateFileReadyState();
           setAnalysisProgress(0, '', false);
-          showFailure('分析失败：请同时上传 JSON / TXT 和 Excel 文件。');
+          showFailure('分析失败：请准备模型结果并上传 Excel 文件。');
           return;
         }
-        if (jsonFile) payload.jsonUpload = { name: jsonFile.name, content: await readTextFile(jsonFile) };
+        if (modelResultSource === 'api') {
+          payload.jsonUpload = {
+            name: `接口结果-${fetchedModelResult.caseId || 'case'}.json`,
+            content: JSON.stringify(fetchedModelResult.content || [], null, 2)
+          };
+        } else if (jsonFile) {
+          payload.jsonUpload = { name: jsonFile.name, content: await readTextFile(jsonFile) };
+        }
         if (excelFile) payload.excelUpload = { name: excelFile.name, base64: await readBase64File(excelFile) };
         setAnalysisProgress(1, '上传文件已读取，正在启动分析任务...', true);
         const started = await post('/api/analyze', payload);
@@ -4685,8 +5033,328 @@ def analysis_job_snapshot(job_id):
         return copy.deepcopy(job) if job else None
 
 
+def batch_case_ids(value):
+    raw = str(value or "")
+    ids = []
+    seen = set()
+    for part in re.split(r"[\s,，;；]+", raw):
+        case_id = part.strip()
+        if not case_id or case_id in seen:
+            continue
+        ids.append(case_id)
+        seen.add(case_id)
+    if not ids:
+        raise ValueError("请至少填写一个 caseId。")
+    return ids
+
+
+def save_batch_excel_upload(payload):
+    excel_upload = payload.get("excelUpload") or {}
+    if not excel_upload.get("base64"):
+        raise ValueError("请先上传 Excel 文件。")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    excel_filename = safe_filename(excel_upload.get("name"), "gold_standard.xlsx")
+    excel_path = UPLOAD_DIR / f"{stamp}-batch-{excel_filename}"
+    excel_path.write_bytes(base64.b64decode(excel_upload["base64"]))
+    return excel_path, excel_filename
+
+
+def batch_summary_from_rows(rows):
+    totals = {
+        "totalCases": len(rows),
+        "successCases": sum(1 for row in rows if row.get("status") == "success"),
+        "failedCases": sum(1 for row in rows if row.get("status") == "error"),
+        "jsonRules": sum(int(row.get("jsonRules") or 0) for row in rows),
+        "excelRows": sum(int(row.get("excelRows") or 0) for row in rows),
+        "reviewRows": sum(int(row.get("reviewRows") or 0) for row in rows),
+        "missedRows": sum(int(row.get("missedRows") or 0) for row in rows),
+        "modelTriggered": sum(int(row.get("modelTriggered") or 0) for row in rows),
+        "modelCorrect": sum(int(row.get("modelCorrect") or 0) for row in rows),
+        "expectedTotal": sum(int(row.get("expectedTotal") or 0) for row in rows),
+        "expectedTriggered": sum(int(row.get("expectedTriggered") or 0) for row in rows),
+        "errorTotal": sum(int(row.get("errorTotal") or 0) for row in rows),
+        "errorRecalled": sum(int(row.get("errorRecalled") or 0) for row in rows),
+    }
+    totals["triggerRate"] = pct(totals["expectedTriggered"], totals["expectedTotal"])
+    totals["recall"] = pct(totals["errorRecalled"], totals["errorTotal"])
+    totals["accuracy"] = pct(totals["modelCorrect"], totals["modelTriggered"])
+    return totals
+
+
+def cleanup_batch_jobs():
+    now = time.time()
+    with BATCH_JOBS_LOCK:
+        expired = [
+            job_id for job_id, job in BATCH_JOBS.items()
+            if now - float(job.get("updatedAt") or job.get("createdAt") or now) > BATCH_JOB_TTL_SECONDS
+        ]
+        for job_id in expired:
+            BATCH_JOBS.pop(job_id, None)
+
+
+def update_batch_job(job_id, **changes):
+    with BATCH_JOBS_LOCK:
+        job = BATCH_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(changes)
+        job["updatedAt"] = time.time()
+
+
+def db_batch_rows(job_id):
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT case_id AS caseId, status, message, json_rules AS jsonRules, excel_rows AS excelRows,
+                   review_rows AS reviewRows, missed_rows AS missedRows, model_triggered AS modelTriggered,
+                   model_correct AS modelCorrect, expected_total AS expectedTotal,
+                   expected_triggered AS expectedTriggered, error_total AS errorTotal,
+                   error_recalled AS errorRecalled, trigger_rate AS triggerRate, recall, accuracy,
+                   analysis_path AS analysisPath
+            FROM batch_cases
+            WHERE job_id=?
+            ORDER BY id
+            """,
+            (job_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_batch_job(payload):
+    cleanup_batch_jobs()
+    init_app_db()
+    base_url = str(payload.get("baseUrl") or DEFAULT_MODEL_RESULT_API).strip()
+    ids = batch_case_ids(payload.get("caseIds"))
+    excel_path, excel_filename = save_batch_excel_upload(payload)
+    job_id = uuid.uuid4().hex
+    created_at = now_text()
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "message": "批量任务已创建，等待开始...",
+        "percent": 0,
+        "total": len(ids),
+        "completed": 0,
+        "success": 0,
+        "failed": 0,
+        "baseUrl": base_url,
+        "excelPath": str(excel_path),
+        "excelFileName": excel_filename,
+        "cases": [{"caseId": case_id, "status": "queued", "message": "等待处理"} for case_id in ids],
+        "summary": batch_summary_from_rows([]),
+        "createdAt": time.time(),
+        "updatedAt": time.time(),
+    }
+    with BATCH_JOBS_LOCK:
+        BATCH_JOBS[job_id] = job
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO batch_jobs(id, base_url, excel_file_name, total, completed, success, failed, status, message, created_at, updated_at)
+            VALUES(?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)
+            """,
+            (job_id, base_url, excel_filename, len(ids), "queued", job["message"], created_at, created_at),
+        )
+        for case_id in ids:
+            conn.execute(
+                "INSERT INTO batch_cases(job_id, case_id, status, message, updated_at) VALUES(?, ?, ?, ?, ?)",
+                (job_id, case_id, "queued", "等待处理", created_at),
+            )
+    thread = threading.Thread(
+        target=run_batch_job,
+        args=(job_id, base_url, ids, str(excel_path), float(payload.get("matchThreshold", 0.67)), float(payload.get("reviewThreshold", 0.82))),
+        daemon=True,
+    )
+    thread.start()
+    return job_id
+
+
+def run_batch_job(job_id, base_url, ids, excel_path, match_threshold, review_threshold):
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    success = failed = completed = 0
+    cases = []
+    for index, case_id in enumerate(ids, start=1):
+        message = f"正在处理 {index} / {len(ids)}：{case_id}"
+        update_batch_job(job_id, status="running", message=message, percent=int((index - 1) * 100 / max(len(ids), 1)))
+        try:
+            fetched = fetch_model_result_from_api(base_url, case_id)
+            json_path = UPLOAD_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-case-{safe_filename(case_id, 'case')}.json"
+            json_path.write_text(json.dumps(fetched["content"], ensure_ascii=False), encoding="utf-8")
+            analysis = build_analysis(json_path, excel_path, match_threshold, review_threshold)
+            analysis["jsonFileName"] = f"接口结果-{case_id}.json"
+            analysis["excelFileName"] = Path(excel_path).name
+            analysis_path = HISTORY_DIR / f"batch-{job_id}-{safe_filename(case_id, 'case')}.json"
+            HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+            analysis_path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
+            summary = analysis.get("summary", {})
+            row = {
+                "caseId": case_id,
+                "status": "success",
+                "message": "成功",
+                "jsonRules": summary.get("jsonRules", len(fetched["content"])),
+                "excelRows": summary.get("excelRows", 0),
+                "reviewRows": summary.get("reviewRows", 0),
+                "missedRows": summary.get("missedRows", 0),
+                "modelTriggered": summary.get("modelTriggered", 0),
+                "modelCorrect": summary.get("modelCorrect", 0),
+                "expectedTotal": summary.get("expectedTotal", 0),
+                "expectedTriggered": summary.get("expectedTriggered", 0),
+                "errorTotal": summary.get("errorTotal", 0),
+                "errorRecalled": summary.get("errorRecalled", 0),
+                "triggerRate": summary.get("triggerRate", 0),
+                "recall": summary.get("recall", 0),
+                "accuracy": summary.get("accuracy", 0),
+                "analysisPath": str(analysis_path),
+            }
+            success += 1
+        except Exception as exc:
+            row = {
+                "caseId": case_id,
+                "status": "error",
+                "message": str(exc),
+                "jsonRules": 0,
+                "excelRows": 0,
+                "reviewRows": 0,
+                "missedRows": 0,
+                "modelTriggered": 0,
+                "modelCorrect": 0,
+                "expectedTotal": 0,
+                "expectedTriggered": 0,
+                "errorTotal": 0,
+                "errorRecalled": 0,
+                "triggerRate": 0,
+                "recall": 0,
+                "accuracy": 0,
+                "analysisPath": "",
+            }
+            failed += 1
+        completed += 1
+        cases.append(row)
+        updated_at = now_text()
+        with db_connect() as conn:
+            conn.execute(
+                """
+                UPDATE batch_cases
+                   SET status=?, message=?, json_rules=?, excel_rows=?, review_rows=?, missed_rows=?,
+                       model_triggered=?, model_correct=?, expected_total=?, expected_triggered=?,
+                       error_total=?, error_recalled=?, trigger_rate=?, recall=?, accuracy=?,
+                       analysis_path=?, updated_at=?
+                 WHERE job_id=? AND case_id=?
+                """,
+                (
+                    row["status"], row["message"], row["jsonRules"], row["excelRows"], row["reviewRows"], row["missedRows"],
+                    row["modelTriggered"], row["modelCorrect"], row["expectedTotal"], row["expectedTriggered"],
+                    row["errorTotal"], row["errorRecalled"], row["triggerRate"], row["recall"], row["accuracy"],
+                    row["analysisPath"], updated_at, job_id, case_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE batch_jobs
+                   SET completed=?, success=?, failed=?, status=?, message=?, updated_at=?
+                 WHERE id=?
+                """,
+                (completed, success, failed, "running", f"已完成 {completed} / {len(ids)}", updated_at, job_id),
+            )
+        update_batch_job(
+            job_id,
+            cases=cases + [{"caseId": item, "status": "queued", "message": "等待处理"} for item in ids[index:]],
+            summary=batch_summary_from_rows(cases),
+            completed=completed,
+            success=success,
+            failed=failed,
+            percent=int(completed * 100 / max(len(ids), 1)),
+            message=f"已完成 {completed} / {len(ids)}",
+        )
+    final_status = "done" if failed == 0 else "done_with_errors"
+    final_message = f"批量完成：成功 {success}，失败 {failed}"
+    update_batch_job(job_id, status=final_status, message=final_message, percent=100)
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE batch_jobs SET status=?, message=?, updated_at=? WHERE id=?",
+            (final_status, final_message, now_text(), job_id),
+        )
+
+
+def batch_job_snapshot(job_id):
+    cleanup_batch_jobs()
+    with BATCH_JOBS_LOCK:
+        job = BATCH_JOBS.get(job_id)
+        if job:
+            return copy.deepcopy(job)
+    rows = db_batch_rows(job_id)
+    if not rows:
+        return None
+    with db_connect() as conn:
+        meta = conn.execute("SELECT * FROM batch_jobs WHERE id=?", (job_id,)).fetchone()
+    if not meta:
+        return None
+    return {
+        "id": job_id,
+        "status": meta["status"],
+        "message": meta["message"],
+        "percent": int((meta["completed"] or 0) * 100 / max(meta["total"] or 1, 1)),
+        "total": meta["total"],
+        "completed": meta["completed"],
+        "success": meta["success"],
+        "failed": meta["failed"],
+        "cases": rows,
+        "summary": batch_summary_from_rows(rows),
+    }
+
+
+def write_batch_export(job_id):
+    snapshot = batch_job_snapshot(job_id)
+    if not snapshot:
+        raise ValueError("批量任务不存在。")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUT_DIR / f"批量测试结果_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "汇总"
+    summary = snapshot.get("summary") or {}
+    rows = [
+        ("总case数", summary.get("totalCases", 0)),
+        ("成功case数", summary.get("successCases", 0)),
+        ("失败case数", summary.get("failedCases", 0)),
+        ("JSON规则数", summary.get("jsonRules", 0)),
+        ("Excel检测项", summary.get("excelRows", 0)),
+        ("漏检项", summary.get("missedRows", 0)),
+        ("触发率", pct_text(summary.get("triggerRate", 0))),
+        ("召回率", pct_text(summary.get("recall", 0))),
+        ("准确率", pct_text(summary.get("accuracy", 0))),
+    ]
+    for row in rows:
+        ws.append(row)
+    detail = wb.create_sheet("明细")
+    headers = ["caseId", "状态", "信息", "JSON规则数", "Excel检测项", "待复核", "漏检", "触发率", "召回率", "准确率"]
+    detail.append(headers)
+    for item in snapshot.get("cases", []):
+        detail.append([
+            item.get("caseId", ""),
+            item.get("status", ""),
+            item.get("message", ""),
+            item.get("jsonRules", 0),
+            item.get("excelRows", 0),
+            item.get("reviewRows", 0),
+            item.get("missedRows", 0),
+            pct_text(float(item.get("triggerRate") or 0)),
+            pct_text(float(item.get("recall") or 0)),
+            pct_text(float(item.get("accuracy") or 0)),
+        ])
+    for sheet in wb.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        for column in range(1, sheet.max_column + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 20
+    wb.save(output_path)
+    return output_path
+
+
 class ToolHandler(BaseHTTPRequestHandler):
-    server_version = "MatchingReviewTool/1.0"
+    server_version = "MatchingReviewTool/2.0"
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -4709,12 +5377,35 @@ class ToolHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(job)
             return
+        if parsed.path == "/api/batch/status":
+            query = urllib.parse.parse_qs(parsed.query)
+            job = batch_job_snapshot(query.get("id", [""])[0])
+            if not job:
+                self.send_json({"error": "批量任务不存在或已过期"}, 404)
+                return
+            self.send_json(job)
+            return
+        if parsed.path == "/api/batch/case":
+            query = urllib.parse.parse_qs(parsed.query)
+            job_id = query.get("id", [""])[0]
+            case_id = query.get("caseId", [""])[0]
+            rows = [row for row in db_batch_rows(job_id) if str(row.get("caseId")) == str(case_id)]
+            if not rows or not rows[0].get("analysisPath"):
+                self.send_json({"error": "该 case 没有可载入的分析明细"}, 404)
+                return
+            path = Path(rows[0]["analysisPath"])
+            if not path.exists():
+                self.send_json({"error": "分析明细文件不存在"}, 404)
+                return
+            self.send_json(json.loads(path.read_text(encoding="utf-8")))
+            return
         if parsed.path not in {"/", "/index.html"}:
             self.send_json({"error": "not found"}, 404)
             return
         defaults = {
             "outputPath": str(DEFAULT_OUTPUT),
             "errorReasonOutputPath": str(DEFAULT_ERROR_REASON_OUTPUT),
+            "modelResultApi": DEFAULT_MODEL_RESULT_API,
         }
         html = HTML.replace("__DEFAULTS__", json.dumps(defaults, ensure_ascii=False))
         self.send_response(200)
@@ -4750,6 +5441,18 @@ class ToolHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/analyze":
                 job_id = create_analysis_job(payload)
                 self.send_json({"jobId": job_id})
+            elif self.path == "/api/model-result/fetch":
+                result = fetch_model_result_from_api(
+                    payload.get("baseUrl") or DEFAULT_MODEL_RESULT_API,
+                    payload.get("caseId") or "",
+                )
+                self.send_json(result)
+            elif self.path == "/api/batch/start":
+                job_id = create_batch_job(payload)
+                self.send_json({"jobId": job_id})
+            elif self.path == "/api/batch/export":
+                output_path = write_batch_export(payload.get("jobId") or "")
+                self.send_json({"outputPath": str(output_path)})
             elif self.path == "/api/export":
                 analysis = payload["analysis"]
                 reviewed = apply_review_assignments(
@@ -4841,6 +5544,7 @@ def main():
     parser.add_argument("--port", default=8765, type=int)
     args = parser.parse_args()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    init_app_db()
     server = ThreadingHTTPServer((args.host, args.port), ToolHandler)
     print(f"匹配复核工具已启动：http://{args.host}:{args.port}")
     try:

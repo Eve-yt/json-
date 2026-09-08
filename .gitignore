@@ -10,6 +10,7 @@ work/history/
 outputs/
 work/server.log
 work/server.pid
+work/review_tool.db
 
 # Generated verification artifacts
 work/verify*.xlsx
