@@ -169,6 +169,8 @@ def init_app_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id TEXT NOT NULL,
                 case_id TEXT NOT NULL,
+                excel_file_name TEXT,
+                excel_path TEXT,
                 status TEXT NOT NULL,
                 message TEXT NOT NULL,
                 json_rules INTEGER,
@@ -189,6 +191,14 @@ def init_app_db():
             )
             """
         )
+        existing_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(batch_cases)").fetchall()
+        }
+        if "excel_file_name" not in existing_columns:
+            conn.execute("ALTER TABLE batch_cases ADD COLUMN excel_file_name TEXT")
+        if "excel_path" not in existing_columns:
+            conn.execute("ALTER TABLE batch_cases ADD COLUMN excel_path TEXT")
 
 
 def now_text():
@@ -2412,9 +2422,12 @@ HTML = r"""
           <div><button class="secondary" onclick="fetchModelResult()">拉取模型结果</button></div>
         </div>
         <div id="batchSourcePanel" class="batch-grid hide">
+          <div><label>批量模式</label><select id="batchExcelMode" onchange="updateBatchModeUI()"><option value="shared">共用一个 Excel</option><option value="mapped">每个 case 对应不同 Excel</option></select></div>
           <div><label>批量接口地址</label><input id="batchBaseUrl" placeholder="模型结果接口地址"></div>
           <div><label>caseId 列表</label><textarea id="batchCaseIds" placeholder="一行一个 caseId"></textarea></div>
           <div><label>caseId 文件</label><input id="batchCaseFile" type="file" accept=".txt,.csv,text/plain,text/csv"></div>
+          <div id="batchMappingWrap" class="hide"><label>case-Excel 映射 CSV</label><input id="batchMappingFile" type="file" accept=".csv,.txt,text/csv,text/plain"></div>
+          <div id="batchExcelFilesWrap" class="hide"><label>批量 Excel 文件</label><input id="batchExcelFiles" type="file" multiple accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
           <div><button onclick="startBatchTest()">开始批量测试</button></div>
         </div>
       </section>
@@ -2437,7 +2450,7 @@ HTML = r"""
         <div class="batch-summary" id="batchSummary"></div>
         <div class="batch-table-wrap">
           <table class="batch-table">
-            <thead><tr><th>caseId</th><th>状态</th><th>JSON规则</th><th>Excel检测项</th><th>漏检</th><th>触发率</th><th>召回率</th><th>准确率</th><th>操作</th></tr></thead>
+            <thead><tr><th>caseId</th><th>金标准Excel</th><th>状态</th><th>JSON规则</th><th>Excel检测项</th><th>漏检</th><th>触发率</th><th>召回率</th><th>准确率</th><th>操作</th></tr></thead>
             <tbody id="batchRows"></tbody>
           </table>
         </div>
@@ -2768,6 +2781,9 @@ HTML = r"""
     function escapeHtml(value) {
       return text(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
+    function jsString(value) {
+      return text(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+    }
     function pct(v) { return (v * 100).toFixed(2) + '%'; }
     function text(v) { return v === null || v === undefined ? '' : String(v); }
     function showToast(message, type='info', duration=3600) {
@@ -2854,6 +2870,7 @@ HTML = r"""
         batchInput.addEventListener('input', () => localStorage.setItem('matchingToolBatchBaseUrl', batchInput.value));
       }
       setModelSource(modelResultSource, false);
+      updateBatchModeUI();
     }
     function setModelSource(source, notify=true) {
       modelResultSource = ['upload', 'api', 'batch'].includes(source) ? source : 'upload';
@@ -3485,6 +3502,23 @@ HTML = r"""
       const fileText = file ? await readTextFile(file) : '';
       return [typed, fileText].filter(Boolean).join('\n');
     }
+    function updateBatchModeUI() {
+      const mapped = document.getElementById('batchExcelMode')?.value === 'mapped';
+      document.getElementById('batchMappingWrap')?.classList.toggle('hide', !mapped);
+      document.getElementById('batchExcelFilesWrap')?.classList.toggle('hide', !mapped);
+    }
+    async function readBatchMapping() {
+      const file = document.getElementById('batchMappingFile')?.files?.[0];
+      return file ? await readTextFile(file) : '';
+    }
+    async function readBatchExcelFiles() {
+      const files = [...(document.getElementById('batchExcelFiles')?.files || [])];
+      const result = [];
+      for (const file of files) {
+        result.push({name: file.name, base64: await readBase64File(file)});
+      }
+      return result;
+    }
     function renderBatchResult(job) {
       document.getElementById('batchResult')?.classList.remove('hide');
       const summary = job.summary || {};
@@ -3506,6 +3540,7 @@ HTML = r"""
       document.getElementById('batchRows').innerHTML = rows.map(item => `
         <tr>
           <td>${escapeHtml(item.caseId)}</td>
+          <td>${escapeHtml(item.excelFileName || '')}</td>
           <td>${escapeHtml(item.status || '')}<div class="small">${escapeHtml(item.message || '')}</div></td>
           <td>${item.jsonRules || 0}</td>
           <td>${item.excelRows || 0}</td>
@@ -3513,8 +3548,8 @@ HTML = r"""
           <td>${pct(item.triggerRate || 0)}</td>
           <td>${pct(item.recall || 0)}</td>
           <td>${pct(item.accuracy || 0)}</td>
-          <td>${item.status === 'success' ? `<button class="secondary mini" onclick="loadBatchCase('${escapeHtml(item.caseId)}')">查看明细</button>` : '/'}</td>
-        </tr>`).join('') || '<tr><td colspan="9" class="small">暂无批量结果。</td></tr>';
+          <td>${item.status === 'success' ? `<button class="secondary mini" onclick="loadBatchCase('${jsString(item.caseId)}')">查看明细</button>` : '/'}</td>
+        </tr>`).join('') || '<tr><td colspan="10" class="small">暂无批量结果。</td></tr>';
     }
     async function waitForBatchJob(jobId) {
       activeBatchJobId = jobId;
@@ -3532,15 +3567,22 @@ HTML = r"""
     }
     async function startBatchTest() {
       const excelFile = document.getElementById('excelFile')?.files?.[0];
-      if (!excelFile) { showFailure('请先上传 Excel 文件。'); return; }
+      const excelMode = document.getElementById('batchExcelMode')?.value || 'shared';
+      if (excelMode === 'shared' && !excelFile) { showFailure('共用 Excel 模式请先上传 Excel 文件。'); return; }
       try {
         const payload = {
           baseUrl: document.getElementById('batchBaseUrl')?.value || defaults.modelResultApi,
+          excelMode,
           caseIds: await readBatchCaseIds(),
           matchThreshold: Number(document.getElementById('matchThreshold').value),
           reviewThreshold: Number(document.getElementById('reviewThreshold').value),
-          excelUpload: { name: excelFile.name, base64: await readBase64File(excelFile) }
         };
+        if (excelMode === 'mapped') {
+          payload.mappingContent = await readBatchMapping();
+          payload.excelFiles = await readBatchExcelFiles();
+        } else {
+          payload.excelUpload = { name: excelFile.name, base64: await readBase64File(excelFile) };
+        }
         document.getElementById('batchResult')?.classList.remove('hide');
         document.getElementById('batchStatus').textContent = '正在启动批量任务...';
         const started = await post('/api/batch/start', payload);
@@ -5048,16 +5090,91 @@ def batch_case_ids(value):
     return ids
 
 
-def save_batch_excel_upload(payload):
-    excel_upload = payload.get("excelUpload") or {}
+def save_batch_excel_upload(excel_upload, prefix="batch"):
+    excel_upload = excel_upload or {}
     if not excel_upload.get("base64"):
         raise ValueError("请先上传 Excel 文件。")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excel_filename = safe_filename(excel_upload.get("name"), "gold_standard.xlsx")
-    excel_path = UPLOAD_DIR / f"{stamp}-batch-{excel_filename}"
+    excel_path = UPLOAD_DIR / f"{stamp}-{prefix}-{excel_filename}"
     excel_path.write_bytes(base64.b64decode(excel_upload["base64"]))
     return excel_path, excel_filename
+
+
+def save_batch_excel_files(payload):
+    files = payload.get("excelFiles") or []
+    saved = {}
+    duplicates = set()
+    for item in files:
+        if not isinstance(item, dict) or not item.get("base64"):
+            continue
+        path, filename = save_batch_excel_upload(item, "batch-map")
+        key = str(item.get("name") or filename).strip()
+        safe_key = safe_filename(key, filename)
+        for name in {key, safe_key, filename}:
+            if not name:
+                continue
+            if name in saved:
+                duplicates.add(name)
+            saved[name] = {"path": str(path), "fileName": filename}
+    if not saved:
+        raise ValueError("映射模式请上传对应的 Excel 文件。")
+    if duplicates:
+        raise ValueError(f"存在重复 Excel 文件名：{', '.join(sorted(duplicates))}")
+    return saved
+
+
+def parse_case_excel_mapping(text):
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("映射模式请上传 case-Excel 映射 CSV。")
+    pairs = []
+    for index, line in enumerate(lines):
+        parts = [part.strip().strip('"') for part in re.split(r"[,，\t]", line) if part.strip()]
+        if len(parts) < 2:
+            raise ValueError(f"映射表第 {index + 1} 行格式不正确，应为 caseId,excelName。")
+        if index == 0 and norm_text(parts[0]).lower() in {"caseid", "案件id"}:
+            continue
+        pairs.append({"caseId": parts[0], "excelName": parts[1]})
+    if not pairs:
+        raise ValueError("映射表没有有效数据。")
+    return pairs
+
+
+def resolve_batch_cases(payload):
+    mode = payload.get("excelMode") or "shared"
+    excel_upload = payload.get("excelUpload") or {}
+    if mode == "mapped":
+        excel_files = save_batch_excel_files(payload)
+        pairs = parse_case_excel_mapping(payload.get("mappingContent") or "")
+        cases = []
+        missing = []
+        seen = set()
+        for pair in pairs:
+            case_id = pair["caseId"]
+            excel_name = pair["excelName"]
+            if case_id in seen:
+                continue
+            seen.add(case_id)
+            match = excel_files.get(excel_name) or excel_files.get(safe_filename(excel_name, excel_name)) or excel_files.get(Path(excel_name).name)
+            if not match:
+                missing.append(f"{case_id}->{excel_name}")
+                continue
+            cases.append({
+                "caseId": case_id,
+                "excelPath": match["path"],
+                "excelFileName": match["fileName"],
+            })
+        if missing:
+            raise ValueError(f"映射表中有 Excel 未上传：{'; '.join(missing[:8])}{'...' if len(missing) > 8 else ''}")
+        return cases, "按映射表选择 Excel"
+    ids = batch_case_ids(payload.get("caseIds"))
+    excel_path, excel_filename = save_batch_excel_upload(excel_upload, "batch")
+    return [
+        {"caseId": case_id, "excelPath": str(excel_path), "excelFileName": excel_filename}
+        for case_id in ids
+    ], excel_filename
 
 
 def batch_summary_from_rows(rows):
@@ -5106,7 +5223,8 @@ def db_batch_rows(job_id):
     with db_connect() as conn:
         rows = conn.execute(
             """
-            SELECT case_id AS caseId, status, message, json_rules AS jsonRules, excel_rows AS excelRows,
+            SELECT case_id AS caseId, excel_file_name AS excelFileName, excel_path AS excelPath,
+                   status, message, json_rules AS jsonRules, excel_rows AS excelRows,
                    review_rows AS reviewRows, missed_rows AS missedRows, model_triggered AS modelTriggered,
                    model_correct AS modelCorrect, expected_total AS expectedTotal,
                    expected_triggered AS expectedTriggered, error_total AS errorTotal,
@@ -5125,8 +5243,7 @@ def create_batch_job(payload):
     cleanup_batch_jobs()
     init_app_db()
     base_url = str(payload.get("baseUrl") or DEFAULT_MODEL_RESULT_API).strip()
-    ids = batch_case_ids(payload.get("caseIds"))
-    excel_path, excel_filename = save_batch_excel_upload(payload)
+    cases, excel_filename = resolve_batch_cases(payload)
     job_id = uuid.uuid4().hex
     created_at = now_text()
     job = {
@@ -5134,14 +5251,13 @@ def create_batch_job(payload):
         "status": "queued",
         "message": "批量任务已创建，等待开始...",
         "percent": 0,
-        "total": len(ids),
+        "total": len(cases),
         "completed": 0,
         "success": 0,
         "failed": 0,
         "baseUrl": base_url,
-        "excelPath": str(excel_path),
         "excelFileName": excel_filename,
-        "cases": [{"caseId": case_id, "status": "queued", "message": "等待处理"} for case_id in ids],
+        "cases": [{**case, "status": "queued", "message": "等待处理"} for case in cases],
         "summary": batch_summary_from_rows([]),
         "createdAt": time.time(),
         "updatedAt": time.time(),
@@ -5154,42 +5270,51 @@ def create_batch_job(payload):
             INSERT OR REPLACE INTO batch_jobs(id, base_url, excel_file_name, total, completed, success, failed, status, message, created_at, updated_at)
             VALUES(?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)
             """,
-            (job_id, base_url, excel_filename, len(ids), "queued", job["message"], created_at, created_at),
+            (job_id, base_url, excel_filename, len(cases), "queued", job["message"], created_at, created_at),
         )
-        for case_id in ids:
+        for case in cases:
             conn.execute(
-                "INSERT INTO batch_cases(job_id, case_id, status, message, updated_at) VALUES(?, ?, ?, ?, ?)",
-                (job_id, case_id, "queued", "等待处理", created_at),
+                """
+                INSERT INTO batch_cases(job_id, case_id, excel_file_name, excel_path, status, message, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (job_id, case["caseId"], case["excelFileName"], case["excelPath"], "queued", "等待处理", created_at),
             )
     thread = threading.Thread(
         target=run_batch_job,
-        args=(job_id, base_url, ids, str(excel_path), float(payload.get("matchThreshold", 0.67)), float(payload.get("reviewThreshold", 0.82))),
+        args=(job_id, base_url, cases, float(payload.get("matchThreshold", 0.67)), float(payload.get("reviewThreshold", 0.82))),
         daemon=True,
     )
     thread.start()
     return job_id
 
 
-def run_batch_job(job_id, base_url, ids, excel_path, match_threshold, review_threshold):
+def run_batch_job(job_id, base_url, cases_input, match_threshold, review_threshold):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     success = failed = completed = 0
     cases = []
-    for index, case_id in enumerate(ids, start=1):
-        message = f"正在处理 {index} / {len(ids)}：{case_id}"
-        update_batch_job(job_id, status="running", message=message, percent=int((index - 1) * 100 / max(len(ids), 1)))
+    total = len(cases_input)
+    for index, case_item in enumerate(cases_input, start=1):
+        case_id = case_item["caseId"]
+        excel_path = case_item["excelPath"]
+        excel_file_name = case_item["excelFileName"]
+        message = f"正在处理 {index} / {total}：{case_id}"
+        update_batch_job(job_id, status="running", message=message, percent=int((index - 1) * 100 / max(total, 1)))
         try:
             fetched = fetch_model_result_from_api(base_url, case_id)
             json_path = UPLOAD_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-case-{safe_filename(case_id, 'case')}.json"
             json_path.write_text(json.dumps(fetched["content"], ensure_ascii=False), encoding="utf-8")
             analysis = build_analysis(json_path, excel_path, match_threshold, review_threshold)
             analysis["jsonFileName"] = f"接口结果-{case_id}.json"
-            analysis["excelFileName"] = Path(excel_path).name
+            analysis["excelFileName"] = excel_file_name
             analysis_path = HISTORY_DIR / f"batch-{job_id}-{safe_filename(case_id, 'case')}.json"
             HISTORY_DIR.mkdir(parents=True, exist_ok=True)
             analysis_path.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
             summary = analysis.get("summary", {})
             row = {
                 "caseId": case_id,
+                "excelFileName": excel_file_name,
+                "excelPath": excel_path,
                 "status": "success",
                 "message": "成功",
                 "jsonRules": summary.get("jsonRules", len(fetched["content"])),
@@ -5211,6 +5336,8 @@ def run_batch_job(job_id, base_url, ids, excel_path, match_threshold, review_thr
         except Exception as exc:
             row = {
                 "caseId": case_id,
+                "excelFileName": excel_file_name,
+                "excelPath": excel_path,
                 "status": "error",
                 "message": str(exc),
                 "jsonRules": 0,
@@ -5255,17 +5382,17 @@ def run_batch_job(job_id, base_url, ids, excel_path, match_threshold, review_thr
                    SET completed=?, success=?, failed=?, status=?, message=?, updated_at=?
                  WHERE id=?
                 """,
-                (completed, success, failed, "running", f"已完成 {completed} / {len(ids)}", updated_at, job_id),
+                (completed, success, failed, "running", f"已完成 {completed} / {total}", updated_at, job_id),
             )
         update_batch_job(
             job_id,
-            cases=cases + [{"caseId": item, "status": "queued", "message": "等待处理"} for item in ids[index:]],
+            cases=cases + [{**item, "status": "queued", "message": "等待处理"} for item in cases_input[index:]],
             summary=batch_summary_from_rows(cases),
             completed=completed,
             success=success,
             failed=failed,
-            percent=int(completed * 100 / max(len(ids), 1)),
-            message=f"已完成 {completed} / {len(ids)}",
+            percent=int(completed * 100 / max(total, 1)),
+            message=f"已完成 {completed} / {total}",
         )
     final_status = "done" if failed == 0 else "done_with_errors"
     final_message = f"批量完成：成功 {success}，失败 {failed}"
@@ -5328,11 +5455,12 @@ def write_batch_export(job_id):
     for row in rows:
         ws.append(row)
     detail = wb.create_sheet("明细")
-    headers = ["caseId", "状态", "信息", "JSON规则数", "Excel检测项", "待复核", "漏检", "触发率", "召回率", "准确率"]
+    headers = ["caseId", "金标准Excel", "状态", "信息", "JSON规则数", "Excel检测项", "待复核", "漏检", "触发率", "召回率", "准确率"]
     detail.append(headers)
     for item in snapshot.get("cases", []):
         detail.append([
             item.get("caseId", ""),
+            item.get("excelFileName", ""),
             item.get("status", ""),
             item.get("message", ""),
             item.get("jsonRules", 0),
