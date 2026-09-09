@@ -409,6 +409,14 @@ def safe_filename(name, fallback):
     return name or fallback
 
 
+def review_output_path(analysis):
+    excel_name = analysis.get("excelFileName") or Path(analysis.get("excelPath") or "").name or "复核结果.xlsx"
+    safe_name = safe_filename(excel_name, "复核结果.xlsx")
+    stem = Path(safe_name).stem or "复核结果"
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    return OUTPUT_DIR / f"{stem}_复核后标注统计_{stamp}.xlsx"
+
+
 def history_id(value):
     value = str(value or "")
     return value if re.fullmatch(r"[0-9A-Za-z_-]{8,80}", value) else ""
@@ -5180,8 +5188,7 @@ HTML = r"""
           verdictOverrides,
           categoryOverrides,
           errorReasonOverrides,
-          summarySnapshot: currentSummarySnapshot(),
-          outputPath: defaults.outputPath
+          summarySnapshot: currentSummarySnapshot()
         });
         document.getElementById('status').textContent = `已导出：${result.outputPath}`;
         showSuccess('导出成功：复核结果已生成。');
@@ -5810,7 +5817,7 @@ class ToolHandler(BaseHTTPRequestHandler):
                     payload.get("errorReasonOverrides", {}),
                 )
                 reviewed["summary"] = merge_summary_snapshot(reviewed.get("summary"), payload.get("summarySnapshot"))
-                output_path = Path(payload.get("outputPath") or DEFAULT_OUTPUT)
+                output_path = Path(payload.get("outputPath") or review_output_path(analysis))
                 write_reviewed_workbook(analysis["excelPath"], output_path, reviewed)
                 self.send_json({"outputPath": str(output_path), "summary": reviewed["summary"]})
             elif self.path == "/api/export-error-reasons":
