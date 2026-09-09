@@ -2525,6 +2525,7 @@ HTML = r"""
             <span class="status-legend-item incomplete" tabindex="0" data-tip="材料尚未完成全部确认，或还没有点击“提交文件”。">未完成</span>
             <span class="status-legend-item completed" tabindex="0" data-tip="检测项已完成确认，并且已经点击“提交文件”。">已完成</span>
           </div>
+          <button id="saveHistoryButton" class="secondary" disabled onclick="openHistorySaveDialog()">保存当前比对</button>
           <button id="exportButton" class="secondary" disabled onclick="exportWorkbook()">导出复核结果</button>
         </div>
         <div class="analysis-progress hide" id="analysisProgress" aria-live="polite">
@@ -2576,11 +2577,9 @@ HTML = r"""
               <span id="currentMaterialStatus" class="file-status">未完成</span>
             </div>
             <div class="review-actions">
-              <button class="secondary" onclick="confirmCurrentMaterial()">确认当前材料已匹配项</button>
               <button id="saveGoldButton" class="secondary" disabled onclick="saveGoldStandards()">保存金标准修改</button>
               <button onclick="submitCurrentMaterial()">提交当前文件</button>
               <button class="secondary" onclick="jumpNextPendingMaterial()">下一组待复核</button>
-              <button class="secondary" onclick="openHistorySaveDialog()">保存当前比对</button>
             </div>
           </div>
           <div class="gold-edit-status" id="goldEditStatus">金标准未修改</div>
@@ -2897,6 +2896,7 @@ HTML = r"""
       document.getElementById('cards')?.classList.toggle('hide', !visible);
       document.getElementById('reviewWorkspace')?.classList.toggle('hide', !visible);
       document.getElementById('exportButton')?.toggleAttribute('disabled', !visible);
+      document.getElementById('saveHistoryButton')?.toggleAttribute('disabled', !visible);
       document.getElementById('analysisEmpty')?.classList.toggle('hide', visible);
     }
     function initModelSourceControls() {
