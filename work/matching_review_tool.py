@@ -90,7 +90,7 @@ def gold_correct(value):
     s = "" if value is None else str(value).strip()
     if not s or s in {"/", "None", "none", "无"}:
         return None
-    return "是" in s
+    return s == "是"
 
 
 def split_copy_values(value, allow_text_parts=False):
@@ -509,10 +509,7 @@ def save_history_record(analysis, assignments, verdict_overrides, category_overr
         category_overrides,
         error_reason_overrides,
     )
-    saved_summary = copy.deepcopy(reviewed["summary"])
-    if isinstance(summary_snapshot, dict):
-        # The workbench is the source of truth for the numbers the user just saw.
-        saved_summary.update(summary_snapshot)
+    saved_summary = merge_summary_snapshot(reviewed["summary"], summary_snapshot)
     record_id = f"{time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     created_at = time.strftime("%Y-%m-%d %H:%M:%S")
     record = {
@@ -557,7 +554,7 @@ def load_history_record(record_id):
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or data.get("id") != record_id:
             return None
-        saved_summary = data.get("summarySnapshot")
+        saved_summary = data.get("summarySnapshot") or data.get("summary")
         if isinstance(data.get("analysis"), dict):
             reviewed = apply_review_assignments(
                 data["analysis"],
@@ -567,9 +564,7 @@ def load_history_record(record_id):
                 data.get("errorReasonOverrides", {}),
             )
             data["reviewed"] = reviewed
-            data["summary"] = copy.deepcopy(reviewed["summary"])
-            if isinstance(saved_summary, dict):
-                data["summary"].update(saved_summary)
+            data["summary"] = merge_summary_snapshot(reviewed["summary"], saved_summary)
             data["errorReasonDetails"] = collect_error_reason_details(reviewed)
         elif "errorReasonDetails" not in data and isinstance(data.get("reviewed"), dict):
             reviewed = copy.deepcopy(data["reviewed"])
@@ -578,6 +573,13 @@ def load_history_record(record_id):
         return data
     except (OSError, ValueError, TypeError):
         return None
+
+
+def merge_summary_snapshot(base_summary, summary_snapshot):
+    summary = copy.deepcopy(base_summary or {})
+    if isinstance(summary_snapshot, dict):
+        summary.update(copy.deepcopy(summary_snapshot))
+    return summary
 
 
 def refreshed_history_index():
@@ -1401,7 +1403,12 @@ def apply_review_assignments(analysis, assignments, verdict_overrides=None, cate
     rows = copy.deepcopy(analysis["rows"])
     for row in rows:
         row["goldTrigger"] = normalize_gold_trigger(row.get("goldTrigger"))
-        row["goldCorrect"] = gold_correct(row.get("goldRaw"))
+        existing_gold_correct = normalize_gold_trigger(row.get("goldCorrect"))
+        if existing_gold_correct:
+            row["goldCorrect"] = existing_gold_correct
+        else:
+            raw_gold_correct = gold_correct(row.get("goldRaw"))
+            row["goldCorrect"] = "" if raw_gold_correct is None else ("是" if raw_gold_correct else "否")
         key = review_row_key(row)
         assigned = assignments.get(key, row["assignedId"])
         if assigned in ("", None, "none", "null"):
@@ -4033,7 +4040,7 @@ HTML = r"""
           errorReasonOverrides,
           completedMaterials,
           confirmedRows,
-          summarySnapshot: currentSummary(),
+          summarySnapshot: currentSummarySnapshot(),
           modelReviewStart,
           modelReviewEnd
         });
@@ -4305,6 +4312,12 @@ HTML = r"""
         accuracy: modelTriggered ? modelCorrect / modelTriggered : 0,
       };
     }
+    function currentSummarySnapshot() {
+      return {
+        ...currentSummary(),
+        dimensionStats: currentDimensionStats(),
+      };
+    }
     function goldRowPending(row) {
       return Boolean(row && row.materialCopyPending && (
         !['是', '否'].includes(row.goldTrigger) || !['是', '否'].includes(row.goldCorrect)
@@ -4387,7 +4400,7 @@ HTML = r"""
     function goldCorrectFromRaw(value) {
       const raw = text(value).trim();
       if (!raw || ['/', '无', 'none', 'None'].includes(raw)) return '';
-      return raw.includes('是') ? '是' : '否';
+      return raw === '是' ? '是' : '否';
     }
     function markGoldDirty(rowNum) {
       const row = getRow(rowNum);
@@ -5107,6 +5120,7 @@ HTML = r"""
           verdictOverrides,
           categoryOverrides,
           errorReasonOverrides,
+          summarySnapshot: currentSummarySnapshot(),
           outputPath: defaults.outputPath
         });
         document.getElementById('status').textContent = `已导出：${result.outputPath}`;
@@ -5735,6 +5749,7 @@ class ToolHandler(BaseHTTPRequestHandler):
                     payload.get("categoryOverrides", {}),
                     payload.get("errorReasonOverrides", {}),
                 )
+                reviewed["summary"] = merge_summary_snapshot(reviewed.get("summary"), payload.get("summarySnapshot"))
                 output_path = Path(payload.get("outputPath") or DEFAULT_OUTPUT)
                 write_reviewed_workbook(analysis["excelPath"], output_path, reviewed)
                 self.send_json({"outputPath": str(output_path), "summary": reviewed["summary"]})
