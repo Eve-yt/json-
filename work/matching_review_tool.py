@@ -999,38 +999,36 @@ def candidate_triggered(candidate):
     return bool(candidate) and bool(candidate.get("modelTriggered", True))
 
 
-def candidate_identifies_error(candidate):
-    """A JSON result identifies an error scene when its isCorrect field is not true."""
-    return bool(candidate) and candidate.get("isCorrect") is not True
-
-
 def dimension_stats(rows, candidates):
-    candidate_by_id = {candidate["id"]: candidate for candidate in candidates}
     stats = {}
     for category in CATEGORY_NAMES:
-        error_rows = [
+        gold_rows = [
             row
             for row in rows
             if row["category"] == category
             and row["goldTrigger"] == "是"
-            and row["goldCorrect"] != "是"
+            and not gold_row_pending(row)
         ]
-        identified = sum(
-            1
-            for row in error_rows
-            if candidate_identifies_error(candidate_by_id.get(row.get("assignedId")))
-        )
+        model_triggered = sum(1 for row in gold_rows if row.get("modelTriggered"))
+        correct = sum(1 for row in gold_rows if row.get("modelTriggered") and row.get("aa") == "是")
         stats[category] = {
-            "total": len(error_rows),
-            "identified": identified,
-            "rate": pct(identified, len(error_rows)),
+            "goldTriggered": len(gold_rows),
+            "modelTriggered": model_triggered,
+            "correct": correct,
+            "recall": pct(model_triggered, len(gold_rows)),
+            "accuracy": pct(correct, model_triggered),
+            "hitRate": pct(correct, len(gold_rows)),
         }
-    combined_total = sum(stats[category]["total"] for category in ("签名", "日期", "捺印", "印章"))
-    combined_identified = sum(stats[category]["identified"] for category in ("签名", "日期", "捺印", "印章"))
+    combined_gold = sum(stats[category]["goldTriggered"] for category in ("签名", "日期", "捺印", "印章"))
+    combined_model = sum(stats[category]["modelTriggered"] for category in ("签名", "日期", "捺印", "印章"))
+    combined_correct = sum(stats[category]["correct"] for category in ("签名", "日期", "捺印", "印章"))
     stats["综合"] = {
-        "total": combined_total,
-        "identified": combined_identified,
-        "rate": pct(combined_identified, combined_total),
+        "goldTriggered": combined_gold,
+        "modelTriggered": combined_model,
+        "correct": combined_correct,
+        "recall": pct(combined_model, combined_gold),
+        "accuracy": pct(combined_correct, combined_model),
+        "hitRate": pct(combined_correct, combined_gold),
     }
     return stats
 
@@ -1577,20 +1575,23 @@ def write_summary_sheet(ws, summary, exported_at=None):
     for category in ["签名", "日期", "捺印", "印章", "综合", "其他"]:
         data = summary["byCategory"][category]
         rows.append([f"{category}准确率", data["total"] - data["errors"], data["total"], pct_text(data["accuracy"]), "按规则名称分类"])
-    rows.append(["", "", "", "", ""])
+    rows.append(["", "", "", "", "", "", "", ""])
     dimension_header_row = len(rows) + 1
-    rows.append(["统计维度", "模型识别错误场景数", "错误场景总数", "识别率", "计算公式"])
+    rows.append(["统计维度", "金标准触发数", "模型触发数", "判断正确数", "召回率", "准确率", "综合命中率", "计算公式"])
     dimension_stats = summary["dimensionStats"]
     for category in ["签名", "日期", "捺印", "印章", "综合", "其他"]:
         data = dimension_stats[category]
         rows.append([
-            f"{category}错误场景识别率",
-            data["identified"],
-            data["total"],
-            pct_text(data["rate"]),
-            "（是否触发=是且是否正确不为是且所属维度相同且模型isCorrect不为true）/（是否触发=是且是否正确不为是且所属维度相同）",
+            category,
+            data["goldTriggered"],
+            data["modelTriggered"],
+            data["correct"],
+            pct_text(data["recall"]),
+            pct_text(data["accuracy"]),
+            pct_text(data["hitRate"]),
+            "召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数",
         ])
-    rows.append(["", "", "", "", ""])
+    rows.append(["", "", "", "", "", "", "", ""])
     error_reason_header_row = len(rows) + 1
     rows.append(["错误原因", "出现次数", "检测项", "材料", "说明"])
     for item in summary.get("errorReasons", []):
@@ -1602,8 +1603,8 @@ def write_summary_sheet(ws, summary, exported_at=None):
             "来源：模型 isCorrect=false 行的人工填写",
         ])
     title = f"统计汇总（导出时间：{exported_at or time.strftime('%Y-%m-%d %H:%M:%S')}）"
-    ws.append([title, "", "", "", ""])
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=5)
+    ws.append([title, "", "", "", "", "", "", ""])
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=8)
     for row in rows:
         ws.append(row)
     header_fill = PatternFill("solid", fgColor="1F4E78")
@@ -1629,7 +1630,7 @@ def write_summary_sheet(ws, summary, exported_at=None):
     for cell in ws[error_reason_header_row + 1]:
         cell.fill = PatternFill("solid", fgColor="C55A11")
         cell.font = header_font
-    for col, width in enumerate([22, 18, 16, 14, 72], 1):
+    for col, width in enumerate([22, 18, 16, 16, 14, 14, 14, 86], 1):
         ws.column_dimensions[get_column_letter(col)].width = width
     ws.freeze_panes = "A3"
 
@@ -3958,9 +3959,10 @@ HTML = r"""
       detail.innerHTML = `
         <div class="history-detail-title">历史统计：${escapeHtml(record.title || '未命名比对')} <span class="small">${escapeHtml(record.createdAt || '')}</span></div>
         <section class="dimension-panel">
+          <div class="dimension-panel-note">统计范围：按每条检测项的“统计维度”归类，仅统计金标准是否触发=是的检测项。召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数。</div>
           <table class="dimension-table">
-            <thead><tr><th>统计维度</th><th>模型识别错误场景数</th><th>错误场景总数</th><th>识别率</th><th>计算公式</th></tr></thead>
-            <tbody>${categories.map(category => { const item = dimensionStats[category] || {identified:0,total:0,rate:0}; return `<tr><td><b>${category}</b></td><td class="num">${item.identified}</td><td class="num">${item.total}</td><td class="num rate">${historyMetric(item.rate)}</td><td class="small">模型 isCorrect 不为 true / 该维度错误场景总数</td></tr>`; }).join('')}</tbody>
+            <thead><tr><th>统计维度</th><th>金标准触发数</th><th>模型触发数</th><th>判断正确数</th><th>召回率</th><th>准确率</th><th>综合命中率</th><th>计算公式</th></tr></thead>
+            <tbody>${categories.map(category => { const item = dimensionStats[category] || {goldTriggered:0,modelTriggered:0,correct:0,recall:0,accuracy:0,hitRate:0}; return `<tr><td><b>${category}</b></td><td class="num">${item.goldTriggered}</td><td class="num">${item.modelTriggered}</td><td class="num">${item.correct}</td><td class="num rate">${historyMetric(item.recall)}</td><td class="num rate">${historyMetric(item.accuracy)}</td><td class="num rate">${historyMetric(item.hitRate)}</td><td class="small">召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数</td></tr>`; }).join('')}</tbody>
           </table>
         </section>
         <section class="error-reason-panel">
@@ -4184,13 +4186,29 @@ HTML = r"""
       const rows = analysis ? analysis.rows : [];
       const stats = {};
       for (const category of categoryNames) {
-        const errorRows = rows.filter(row => rowCategory(row) === category && row.goldTrigger === '是' && row.goldCorrect !== '是');
-        const identified = errorRows.filter(rowModelIdentifiesError).length;
-        stats[category] = { total: errorRows.length, identified, rate: errorRows.length ? identified / errorRows.length : 0 };
+        const goldRows = rows.filter(row => rowCategory(row) === category && row.goldTrigger === '是' && !goldRowPending(row));
+        const modelTriggered = goldRows.filter(rowModelTriggered).length;
+        const correct = goldRows.filter(row => rowModelTriggered(row) && computedAa(row, rowCandidate(row)) === '是').length;
+        stats[category] = {
+          goldTriggered: goldRows.length,
+          modelTriggered,
+          correct,
+          recall: goldRows.length ? modelTriggered / goldRows.length : 0,
+          accuracy: modelTriggered ? correct / modelTriggered : 0,
+          hitRate: goldRows.length ? correct / goldRows.length : 0,
+        };
       }
-      const combinedTotal = ['签名', '日期', '捺印', '印章'].reduce((sum, category) => sum + stats[category].total, 0);
-      const combinedIdentified = ['签名', '日期', '捺印', '印章'].reduce((sum, category) => sum + stats[category].identified, 0);
-      stats['综合'] = { total: combinedTotal, identified: combinedIdentified, rate: combinedTotal ? combinedIdentified / combinedTotal : 0 };
+      const combinedGold = ['签名', '日期', '捺印', '印章'].reduce((sum, category) => sum + stats[category].goldTriggered, 0);
+      const combinedModel = ['签名', '日期', '捺印', '印章'].reduce((sum, category) => sum + stats[category].modelTriggered, 0);
+      const combinedCorrect = ['签名', '日期', '捺印', '印章'].reduce((sum, category) => sum + stats[category].correct, 0);
+      stats['综合'] = {
+        goldTriggered: combinedGold,
+        modelTriggered: combinedModel,
+        correct: combinedCorrect,
+        recall: combinedGold ? combinedModel / combinedGold : 0,
+        accuracy: combinedModel ? combinedCorrect / combinedModel : 0,
+        hitRate: combinedGold ? combinedCorrect / combinedGold : 0,
+      };
       return stats;
     }
     function renderDimensionStats() {
@@ -4200,13 +4218,13 @@ HTML = r"""
       document.getElementById('dimensionPanel').innerHTML = `
         <div class="dimension-panel-head">
           <div class="dimension-panel-title">统计维度汇总</div>
-          <div class="dimension-panel-note">每行可手动选择维度；统计只看金标准要求触发且金标准判定不为“是”的错误场景。</div>
+          <div class="dimension-panel-note">统计范围：按每条检测项的“统计维度”归类，仅统计金标准是否触发=是的检测项。召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数。</div>
         </div>
         <table class="dimension-table">
-          <thead><tr><th>统计维度</th><th>模型识别错误场景数</th><th>错误场景总数</th><th>识别率</th><th>计算公式</th></tr></thead>
+          <thead><tr><th>统计维度</th><th>金标准触发数</th><th>模型触发数</th><th>判断正确数</th><th>召回率</th><th>准确率</th><th>综合命中率</th><th>计算公式</th></tr></thead>
           <tbody>${categories.map(category => {
             const item = stats[category];
-            return `<tr><td><b>${category}</b></td><td class="num">${item.identified}</td><td class="num">${item.total}</td><td class="num rate">${pct(item.rate)}</td><td class="small">模型 isCorrect 不为 true / 该维度错误场景总数</td></tr>`;
+            return `<tr><td><b>${category}</b></td><td class="num">${item.goldTriggered}</td><td class="num">${item.modelTriggered}</td><td class="num">${item.correct}</td><td class="num rate">${pct(item.recall)}</td><td class="num rate">${pct(item.accuracy)}</td><td class="num rate">${pct(item.hitRate)}</td><td class="small">召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数</td></tr>`;
           }).join('')}</tbody>
         </table>`;
     }
