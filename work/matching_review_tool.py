@@ -2028,12 +2028,14 @@ HTML = r"""
     .dimension-panel { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px; }
     .dimension-panel-head { display:flex; align-items:baseline; gap:10px; margin-bottom:8px; }
     .dimension-panel-title { font-weight:800; }
-    .dimension-panel-note { color:var(--muted); font-size:12px; }
-    .dimension-table { width:100%; border-collapse:collapse; }
+    .dimension-panel-note { color:var(--muted); font-size:12px; line-height:1.6; }
+    .dimension-table { width:100%; border-collapse:collapse; table-layout:fixed; }
     .dimension-table th, .dimension-table td { border:1px solid var(--line); padding:7px 8px; font-size:12px; text-align:left; }
     .dimension-table th { position:static; background:var(--soft); color:var(--ink); }
+    .dimension-table th.num, .dimension-table td.num { text-align:center; }
     .dimension-table td.num { text-align:center; font-weight:700; }
     .dimension-table td.rate { color:var(--blue); font-weight:800; }
+    .dimension-table td.formula { white-space:normal; line-height:1.55; }
     .error-reason-panel { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px; }
     .error-reason-panel-title { display:flex; align-items:center; justify-content:space-between; gap:10px; font-weight:800; margin-bottom:8px; }
     .error-reason-panel-title button { width:auto; min-height:34px; padding:6px 10px; }
@@ -2082,7 +2084,7 @@ HTML = r"""
     .picker-page-status { color:var(--muted); font-size:12px; min-width:150px; text-align:center; }
     .history-save-overlay { position:fixed; inset:0; z-index:40; display:flex; align-items:center; justify-content:center; padding:24px; background:rgba(15,23,42,.42); }
     .history-save-overlay.hide { display:none; }
-    .history-save-dialog { width:min(560px, calc(100vw - 32px)); background:var(--surface); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+    .history-save-dialog { width:min(720px, calc(100vw - 32px)); background:var(--surface); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
     .history-save-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:16px 18px; background:var(--soft); border-bottom:1px solid var(--line); }
     .history-save-title { font-size:17px; font-weight:800; }
     .history-save-subtitle { margin-top:4px; color:var(--muted); font-size:12px; line-height:1.45; }
@@ -2090,7 +2092,8 @@ HTML = r"""
     .history-save-close:hover { background:var(--surface); color:var(--ink); }
     .history-save-body { padding:18px; display:grid; gap:13px; }
     .history-save-body input { width:100%; }
-    .history-save-time-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .history-save-time-grid { display:grid; grid-template-columns:repeat(2, minmax(280px, 1fr)); gap:12px; }
+    .history-save-time-grid input { min-width:0; }
     .history-save-duration { padding:11px 12px; border:1px solid var(--line); border-radius:6px; background:var(--soft); color:var(--muted); font-size:13px; }
     .history-save-actions { display:flex; justify-content:flex-end; gap:8px; padding:0 18px 18px; }
     .history-save-actions button { width:auto; min-width:92px; }
@@ -2398,6 +2401,7 @@ HTML = r"""
       .module-heading { flex-direction:column; }
       .history-save { width:100%; min-width:0; }
       .history-save > button { width:auto; }
+      .history-save-time-grid { grid-template-columns:1fr; }
     }
   </style>
 </head>
@@ -2763,11 +2767,11 @@ HTML = r"""
           <div class="history-save-time-grid">
             <div>
               <label for="modelReviewStart">模型阅卷开始时间</label>
-              <input id="modelReviewStart" type="datetime-local" onchange="updateReviewDurationPreview()">
+              <input id="modelReviewStart" type="datetime-local" step="1" onchange="updateReviewDurationPreview()">
             </div>
             <div>
               <label for="modelReviewEnd">模型阅卷结束时间</label>
-              <input id="modelReviewEnd" type="datetime-local" onchange="updateReviewDurationPreview()">
+              <input id="modelReviewEnd" type="datetime-local" step="1" onchange="updateReviewDurationPreview()">
             </div>
           </div>
           <div class="history-save-duration" id="modelReviewDuration">阅卷时长：未计算</div>
@@ -3932,6 +3936,42 @@ HTML = r"""
       const detail = document.getElementById('historyDetail');
       return detail && detail.dataset.recordId === id && !historyStatsCollapsed[id] ? '收起统计' : '展开统计';
     }
+    function emptyDimensionStat() {
+      return {goldTriggered:0,modelTriggered:0,correct:0,recall:0,accuracy:0,hitRate:0};
+    }
+    function dimensionStatsNote() {
+      return `
+        <div class="dimension-panel-note">
+          统计范围：按每条检测项的“统计维度”归类，仅统计金标准是否触发=是的检测项。金标准触发数=该维度中金标准是否触发=是的检测项数；模型触发数=其中模型是否触发=是的检测项数；判断正确数=其中模型是否触发=是且AA=是的检测项数。<br>
+          召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数。
+        </div>`;
+    }
+    function dimensionColgroup() {
+      return `
+        <colgroup>
+          <col style="width:10%">
+          <col style="width:11%">
+          <col style="width:11%">
+          <col style="width:11%">
+          <col style="width:9%">
+          <col style="width:9%">
+          <col style="width:10%">
+          <col style="width:29%">
+        </colgroup>`;
+    }
+    function dimensionStatsRow(category, item, metricFormatter) {
+      const data = item || emptyDimensionStat();
+      return `<tr>
+        <td><b>${escapeHtml(category)}</b></td>
+        <td class="num">${data.goldTriggered || 0}</td>
+        <td class="num">${data.modelTriggered || 0}</td>
+        <td class="num">${data.correct || 0}</td>
+        <td class="num rate">${metricFormatter(data.recall || 0)}</td>
+        <td class="num rate">${metricFormatter(data.accuracy || 0)}</td>
+        <td class="num rate">${metricFormatter(data.hitRate || 0)}</td>
+        <td class="formula small">召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数</td>
+      </tr>`;
+    }
     async function loadHistoryList(notify=false) {
       try {
         historyItems = await getJson('/api/history');
@@ -3959,10 +3999,11 @@ HTML = r"""
       detail.innerHTML = `
         <div class="history-detail-title">历史统计：${escapeHtml(record.title || '未命名比对')} <span class="small">${escapeHtml(record.createdAt || '')}</span></div>
         <section class="dimension-panel">
-          <div class="dimension-panel-note">统计范围：按每条检测项的“统计维度”归类，仅统计金标准是否触发=是的检测项。召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数。</div>
+          ${dimensionStatsNote()}
           <table class="dimension-table">
-            <thead><tr><th>统计维度</th><th>金标准触发数</th><th>模型触发数</th><th>判断正确数</th><th>召回率</th><th>准确率</th><th>综合命中率</th><th>计算公式</th></tr></thead>
-            <tbody>${categories.map(category => { const item = dimensionStats[category] || {goldTriggered:0,modelTriggered:0,correct:0,recall:0,accuracy:0,hitRate:0}; return `<tr><td><b>${category}</b></td><td class="num">${item.goldTriggered}</td><td class="num">${item.modelTriggered}</td><td class="num">${item.correct}</td><td class="num rate">${historyMetric(item.recall)}</td><td class="num rate">${historyMetric(item.accuracy)}</td><td class="num rate">${historyMetric(item.hitRate)}</td><td class="small">召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数</td></tr>`; }).join('')}</tbody>
+            ${dimensionColgroup()}
+            <thead><tr><th>统计维度</th><th class="num">金标准触发数</th><th class="num">模型触发数</th><th class="num">判断正确数</th><th class="num">召回率</th><th class="num">准确率</th><th class="num">综合命中率</th><th>计算公式</th></tr></thead>
+            <tbody>${categories.map(category => { const item = dimensionStats[category] || emptyDimensionStat(); return dimensionStatsRow(category, item, historyMetric); }).join('')}</tbody>
           </table>
         </section>
         <section class="error-reason-panel">
@@ -4218,13 +4259,14 @@ HTML = r"""
       document.getElementById('dimensionPanel').innerHTML = `
         <div class="dimension-panel-head">
           <div class="dimension-panel-title">统计维度汇总</div>
-          <div class="dimension-panel-note">统计范围：按每条检测项的“统计维度”归类，仅统计金标准是否触发=是的检测项。召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数。</div>
+          ${dimensionStatsNote()}
         </div>
         <table class="dimension-table">
-          <thead><tr><th>统计维度</th><th>金标准触发数</th><th>模型触发数</th><th>判断正确数</th><th>召回率</th><th>准确率</th><th>综合命中率</th><th>计算公式</th></tr></thead>
+          ${dimensionColgroup()}
+          <thead><tr><th>统计维度</th><th class="num">金标准触发数</th><th class="num">模型触发数</th><th class="num">判断正确数</th><th class="num">召回率</th><th class="num">准确率</th><th class="num">综合命中率</th><th>计算公式</th></tr></thead>
           <tbody>${categories.map(category => {
             const item = stats[category];
-            return `<tr><td><b>${category}</b></td><td class="num">${item.goldTriggered}</td><td class="num">${item.modelTriggered}</td><td class="num">${item.correct}</td><td class="num rate">${pct(item.recall)}</td><td class="num rate">${pct(item.accuracy)}</td><td class="num rate">${pct(item.hitRate)}</td><td class="small">召回率=模型触发数/金标准触发数；准确率=判断正确数/模型触发数；综合命中率=判断正确数/金标准触发数</td></tr>`;
+            return dimensionStatsRow(category, item, pct);
           }).join('')}</tbody>
         </table>`;
     }
