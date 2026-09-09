@@ -2845,6 +2845,7 @@ HTML = r"""
     let confirmedRows = {};
     let materialListPage = 1;
     let historyStatsCollapsed = {};
+    let activeHistoryRecord = null;
     let historyPage = 1;
     let historySelectedIds = new Set();
     let annotationWorkbook = null;
@@ -3960,6 +3961,7 @@ HTML = r"""
             <button onclick="loadHistory('${item.id}')">载入复核</button>
             <button class="secondary" onclick="deleteHistory('${item.id}')">删除记录</button>
           </div>
+          ${historyDetailState(item.id) === '收起统计' ? historyDetailHtml(activeHistoryRecord) : ''}
         </article>`).join('');
       const pagination = document.getElementById('historyPagination');
       if (pagination) {
@@ -3972,8 +3974,7 @@ HTML = r"""
       updateHistorySelectionUI();
     }
     function historyDetailState(id) {
-      const detail = document.getElementById('historyDetail');
-      return detail && detail.dataset.recordId === id && !historyStatsCollapsed[id] ? '收起统计' : '展开统计';
+      return activeHistoryRecord && activeHistoryRecord.id === id && !historyStatsCollapsed[id] ? '收起统计' : '展开统计';
     }
     function emptyDimensionStat() {
       return {goldTriggered:0,modelTriggered:0,correct:0,recall:0,accuracy:0,hitRate:0};
@@ -4016,6 +4017,7 @@ HTML = r"""
         historyItems = await getJson('/api/history');
         const validIds = new Set(historyItems.map(item => String(item.id)));
         historySelectedIds = new Set([...historySelectedIds].filter(id => validIds.has(id)));
+        if (activeHistoryRecord && !validIds.has(String(activeHistoryRecord.id))) activeHistoryRecord = null;
         const totalPages = Math.max(1, Math.ceil(historyItems.length / HISTORY_PAGE_SIZE));
         historyPage = Math.min(Math.max(1, historyPage), totalPages);
         renderHistoryList();
@@ -4026,16 +4028,15 @@ HTML = r"""
         if (notify) showFailure(`刷新历史失败：${err.message}`);
       }
     }
-    function renderHistoryDetail(record) {
-      const detail = document.getElementById('historyDetail');
-      detail.dataset.recordId = record.id || '';
-      detail.classList.toggle('hide', Boolean(historyStatsCollapsed[record.id]));
+    function historyDetailHtml(record) {
+      if (!record) return '';
       const summary = record.summary || {};
       const dimensionStats = summary.dimensionStats || {};
       const categories = ['签名', '日期', '捺印', '印章', '综合', '其他'];
       const errorReasonDetails = (record.errorReasonDetails || []).filter(item => String(item['错误原因'] || '').trim());
       const reasonCount = new Set(errorReasonDetails.map(item => item['错误原因'])).size;
-      detail.innerHTML = `
+      return `
+        <div class="history-detail">
         <div class="history-detail-title">历史统计：${escapeHtml(record.title || '未命名比对')} <span class="small">${escapeHtml(record.createdAt || '')}</span></div>
         <section class="dimension-panel">
           ${dimensionStatsNote()}
@@ -4053,16 +4054,24 @@ HTML = r"""
               <tbody>${errorReasonDetails.length ? errorReasonRowsHtml(errorReasonDetails) : `<tr><td colspan="${errorReasonHeaders.length}" class="small">暂无已填写的错误原因。</td></tr>`}</tbody>
             </table>
           </div>
-        </section>`;
+        </section>
+        </div>`;
+    }
+    function renderHistoryDetail(record) {
+      activeHistoryRecord = record || null;
+      const detail = document.getElementById('historyDetail');
+      if (detail) {
+        detail.dataset.recordId = record && record.id ? record.id : '';
+        detail.classList.add('hide');
+        detail.innerHTML = '';
+      }
     }
     function toggleHistoryStats(id) {
-      const detail = document.getElementById('historyDetail');
-      if (detail.dataset.recordId !== id) {
+      if (!activeHistoryRecord || activeHistoryRecord.id !== id) {
         viewHistory(id);
         return;
       }
       historyStatsCollapsed[id] = !historyStatsCollapsed[id];
-      if (detail.dataset.recordId === id) detail.classList.toggle('hide', historyStatsCollapsed[id]);
       renderHistoryList();
     }
     async function viewHistory(id) {
@@ -4161,6 +4170,7 @@ HTML = r"""
       try {
         await post('/api/history/delete', {id});
         historySelectedIds.delete(String(id));
+        if (activeHistoryRecord && activeHistoryRecord.id === id) activeHistoryRecord = null;
         updateHistorySelectionUI();
         document.getElementById('historyDetail').innerHTML = '';
         showSuccess('历史记录删除成功。');
