@@ -1185,7 +1185,7 @@ def write_history_review_sheet(ws, reviewed, summary, exported_at=None):
     """Write the detailed review sheet requested for each history record."""
     exported_at = exported_at or time.strftime("%Y-%m-%d %H:%M:%S")
     summary = summary or reviewed.get("summary") or {}
-    categories = summary.get("byCategory") or {}
+    dimension_summary = summary.get("dimensionStats") or {}
     trigger_header = source_excel_header(
         reviewed,
         13,
@@ -1202,22 +1202,22 @@ def write_history_review_sheet(ws, reviewed, summary, exported_at=None):
     elif "召回率" not in correct_header:
         correct_header = f"{correct_header}\n召回率：{recall_text}"
 
-    signature = categories.get("签名") or {"total": 0, "errors": 0, "accuracy": 0}
-    date = categories.get("日期") or {"total": 0, "errors": 0, "accuracy": 0}
-    print_mark = categories.get("捺印") or {"total": 0, "errors": 0, "accuracy": 0}
-    seal = categories.get("印章") or {"total": 0, "errors": 0, "accuracy": 0}
-    combined = categories.get("综合") or {"total": 0, "errors": 0, "accuracy": 0}
-    other = categories.get("其他") or {"total": 0, "errors": 0, "accuracy": 0}
+    signature = dimension_item(dimension_summary, "签名")
+    date = dimension_item(dimension_summary, "日期")
+    print_mark = dimension_item(dimension_summary, "捺印")
+    seal = dimension_item(dimension_summary, "印章")
+    combined = dimension_item(dimension_summary, "综合")
+    other = dimension_item(dimension_summary, "其他")
     headers = [
         "材料序号", "所在卷宗", "问题类型", "材料类型", "对应材料名称", "所属阶段", "阶段时间顺序",
         "规则名称", "特殊条件", "判断规则", "错误场景", trigger_header, correct_header,
-        cat_header("签名", signature), f"签名错误（{signature['errors']}）",
-        cat_header("日期", date), f"日期错误（{date['errors']}）",
-        cat_header("捺印", print_mark), f"捺印错误（{print_mark['errors']}）",
-        cat_header("印章", seal), f"印章错误（{seal['errors']}）",
-        f"综合\n（签名、日期、捺印和印章）\n（总：{combined['total']}，错：{combined['errors']}）\n准确率：{pct_text(combined['accuracy'])}\n1-({combined['errors']}/{combined['total']})",
-        f"其他\n（{other['total']}）\n准确率：{pct_text(other['accuracy'])}\n1-({other['errors']}/{other['total']})",
-        f"其他错误（{other['errors']}）",
+        dimension_header("签名", signature), dimension_issue_header("签名", signature),
+        dimension_header("日期", date), dimension_issue_header("日期", date),
+        dimension_header("捺印", print_mark), dimension_issue_header("捺印", print_mark),
+        dimension_header("印章", seal), dimension_issue_header("印章", seal),
+        dimension_header("综合", combined),
+        dimension_header("其他", other),
+        dimension_issue_header("其他", other),
         f"复核统计\n触发率：{pct_text(summary.get('triggerRate', 0))}\n模型触发且金标准应触发/金标准应触发={summary.get('expectedTriggered', 0)}/{summary.get('expectedTotal', 0)}",
         f"复核统计\n准确率：{pct_text(summary.get('accuracy', 0))}\n模型实际检测：是：{summary.get('modelTriggered', 0)}，其中错误：{summary.get('modelError', 0)}",
         "错误原因",
@@ -1285,28 +1285,33 @@ def write_history_export_workbook(records, output_path, exported_at=None):
     ws = workbook.active
     ws.title = "比对历史"
     exported_at = exported_at or time.strftime("%Y-%m-%d %H:%M:%S")
+    dimension_headers = []
+    for category in ["签名", "日期", "捺印", "印章", "综合", "其他"]:
+        dimension_headers.extend([f"{category}召回率", f"{category}准确率", f"{category}综合命中率"])
     headers = [
         "比对名称", "Excel 文件名", "保存时间", "阅卷时长",
-        "签名准确率", "日期准确率", "捺印准确率", "印章准确率",
-        "综合准确率", "其他准确率", "触发率", "召回率", "准确率",
+        *dimension_headers, "触发率", "召回率", "准确率",
     ]
     ws.append([f"比对历史（导出时间：{exported_at}）"] + [""] * (len(headers) - 1))
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
     ws.append(headers)
     for record in records:
         summary = record.get("summary") or {}
-        categories = summary.get("byCategory") or {}
+        dimension_stats = summary.get("dimensionStats") or {}
+        dimension_values = []
+        for category in ["签名", "日期", "捺印", "印章", "综合", "其他"]:
+            item = dimension_stats.get(category) or {}
+            dimension_values.extend([
+                pct_text(item.get("recall", 0)),
+                pct_text(item.get("accuracy", 0)),
+                pct_text(item.get("hitRate", 0)),
+            ])
         ws.append([
             record.get("title") or "未命名比对",
             record.get("excelFileName") or Path(record.get("excelPath") or "").name,
             record.get("createdAt") or "",
             record.get("modelReviewDurationText") or "未填写",
-            pct_text((categories.get("签名") or {}).get("accuracy", 0)),
-            pct_text((categories.get("日期") or {}).get("accuracy", 0)),
-            pct_text((categories.get("捺印") or {}).get("accuracy", 0)),
-            pct_text((categories.get("印章") or {}).get("accuracy", 0)),
-            pct_text((categories.get("综合") or {}).get("accuracy", 0)),
-            pct_text((categories.get("其他") or {}).get("accuracy", 0)),
+            *dimension_values,
             pct_text(summary.get("triggerRate", 0)),
             pct_text(summary.get("recall", 0)),
             pct_text(summary.get("accuracy", 0)),
@@ -1328,12 +1333,13 @@ def write_history_export_workbook(records, output_path, exported_at=None):
         for cell in row:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             cell.border = Border(bottom=thin)
-    for column, width in enumerate([30, 32, 22, 18, 14, 14, 14, 14, 14, 14, 14, 14, 14], start=1):
+    widths = [30, 32, 22, 18] + [14] * len(dimension_headers) + [14, 14, 14]
+    for column, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(column)].width = width
     ws.row_dimensions[1].height = 28
     ws.row_dimensions[2].height = 30
     ws.freeze_panes = "A3"
-    ws.auto_filter.ref = f"A2:M{max(2, ws.max_row)}"
+    ws.auto_filter.ref = f"A2:{get_column_letter(len(headers))}{max(2, ws.max_row)}"
     ws.sheet_view.showGridLines = False
     for index, record in enumerate(records, start=1):
         prefix = f"历史{index:02d}"
@@ -1534,20 +1540,24 @@ def write_reviewed_workbook(excel_path, output_path, reviewed):
         ws.cell(r, 29).value = delimiter.join(descriptions) if delimiter else descriptions[0]
 
     summary = reviewed["summary"]
-    cats = summary["byCategory"]
-    ws["O1"] = cat_header("签名", cats["签名"])
-    ws["P1"] = f"签名错误（{cats['签名']['errors']}）"
-    ws["Q1"] = cat_header("日期", cats["日期"])
-    ws["R1"] = f"日期错误（{cats['日期']['errors']}）"
-    ws["S1"] = cat_header("捺印", cats["捺印"])
-    ws["T1"] = f"捺印错误（{cats['捺印']['errors']}）"
-    ws["U1"] = cat_header("印章", cats["印章"])
-    ws["V1"] = f"印章错误（{cats['印章']['errors']}）"
-    comp = cats["综合"]
-    other = cats["其他"]
-    ws["W1"] = f"综合\n（签名、日期、捺印和印章）\n（总：{comp['total']}，错：{comp['errors']}）\n准确率：{pct_text(comp['accuracy'])}\n1-({comp['errors']}/{comp['total']})"
-    ws["X1"] = f"其他\n（{other['total']}）\n准确率：{pct_text(other['accuracy'])}\n1-({other['errors']}/{other['total']})"
-    ws["Y1"] = f"其他错误（{other['errors']}）"
+    dimension_summary = summary.get("dimensionStats") or {}
+    signature = dimension_item(dimension_summary, "签名")
+    date = dimension_item(dimension_summary, "日期")
+    print_mark = dimension_item(dimension_summary, "捺印")
+    seal = dimension_item(dimension_summary, "印章")
+    comp = dimension_item(dimension_summary, "综合")
+    other = dimension_item(dimension_summary, "其他")
+    ws["O1"] = dimension_header("签名", signature)
+    ws["P1"] = dimension_issue_header("签名", signature)
+    ws["Q1"] = dimension_header("日期", date)
+    ws["R1"] = dimension_issue_header("日期", date)
+    ws["S1"] = dimension_header("捺印", print_mark)
+    ws["T1"] = dimension_issue_header("捺印", print_mark)
+    ws["U1"] = dimension_header("印章", seal)
+    ws["V1"] = dimension_issue_header("印章", seal)
+    ws["W1"] = dimension_header("综合", comp)
+    ws["X1"] = dimension_header("其他", other)
+    ws["Y1"] = dimension_issue_header("其他", other)
     ws["Z1"] = f"复核统计\n触发率：{pct_text(summary['triggerRate'])}\n模型触发且金标准应触发/金标准应触发={summary['expectedTriggered']}/{summary['expectedTotal']}"
     ws["AA1"] = f"复核统计\n准确率：{pct_text(summary['accuracy'])}\n模型实际检测：是：{summary['modelTriggered']}，其中错误：{summary['modelError']}"
     for c in range(15, 30):
@@ -1569,8 +1579,32 @@ def write_reviewed_workbook(excel_path, output_path, reviewed):
     workbook.save(output_path)
 
 
-def cat_header(name, data):
-    return f"{name}\n（{data['total']}）\n准确率：{pct_text(data['accuracy'])}\n=1-({data['errors']}/{data['total']})"
+def dimension_item(dimension_summary, category):
+    data = (dimension_summary or {}).get(category) or {}
+    return {
+        "goldTriggered": int(data.get("goldTriggered") or 0),
+        "modelTriggered": int(data.get("modelTriggered") or 0),
+        "correct": int(data.get("correct") or 0),
+        "recall": data.get("recall") or 0,
+        "accuracy": data.get("accuracy") or 0,
+        "hitRate": data.get("hitRate") or 0,
+    }
+
+
+def dimension_header(name, data):
+    return (
+        f"{name}\n"
+        f"金标准触发数：{data['goldTriggered']}\n"
+        f"模型触发数：{data['modelTriggered']}\n"
+        f"判断正确数：{data['correct']}\n"
+        f"召回率：{pct_text(data['recall'])}\n"
+        f"准确率：{pct_text(data['accuracy'])}\n"
+        f"综合命中率：{pct_text(data['hitRate'])}"
+    )
+
+
+def dimension_issue_header(name, data):
+    return f"{name}未命中/误判（{max(0, data['goldTriggered'] - data['correct'])}）"
 
 
 def write_summary_sheet(ws, summary, exported_at=None):
@@ -1580,9 +1614,6 @@ def write_summary_sheet(ws, summary, exported_at=None):
         ["触发率", summary["expectedTriggered"], summary["expectedTotal"], pct_text(summary["triggerRate"]), "模型触发的金标准检测项 / 金标准要求触发的检测项"],
         ["准确率", summary["modelCorrect"], summary["modelTriggered"], pct_text(summary["accuracy"]), "模型判断正确的已触发检测项 / 模型已触发的检测项"],
     ]
-    for category in ["签名", "日期", "捺印", "印章", "综合", "其他"]:
-        data = summary["byCategory"][category]
-        rows.append([f"{category}准确率", data["total"] - data["errors"], data["total"], pct_text(data["accuracy"]), "按规则名称分类"])
     rows.append(["", "", "", "", "", "", "", ""])
     dimension_header_row = len(rows) + 1
     rows.append(["统计维度", "金标准触发数", "模型触发数", "判断正确数", "召回率", "准确率", "综合命中率", "计算公式"])
