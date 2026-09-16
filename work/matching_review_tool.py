@@ -39,6 +39,7 @@ BATCH_JOBS = {}
 BATCH_JOBS_LOCK = threading.Lock()
 BATCH_JOB_TTL_SECONDS = 12 * 60 * 60
 DEFAULT_MODEL_RESULT_API = "http://120.195.114.115:5025/intelli-judge/cpc/procedure/rule/result"
+DEFAULT_CASE_DETAIL_API = "http://120.195.114.115:5025/intelli-judge/case/caseDetail"
 CATEGORY_NAMES = ("签名", "日期", "捺印", "印章", "其他")
 ERROR_REASON_HEADERS = (
     "错误原因", "来源文件", "材料类型", "对应材料名称",
@@ -257,6 +258,45 @@ def fetch_model_result_from_api(base_url, case_id, timeout=20):
             (cache_key, base_url.strip(), case_id.strip(), now_text(), len(items), json.dumps(items, ensure_ascii=False)),
         )
     return {"url": url, "caseId": case_id.strip(), "count": len(items), "content": items}
+
+
+def case_detail_url(base_url, case_id):
+    base_url = str(base_url or "").strip().rstrip("/")
+    case_id = str(case_id or "").strip()
+    if not base_url:
+        raise ValueError("请填写案件详情接口地址。")
+    if not case_id:
+        raise ValueError("请填写 caseId。")
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("案件详情接口地址必须是 http 或 https。")
+    return f"{base_url}/{urllib.parse.quote(case_id, safe='')}"
+
+
+def fetch_case_detail_from_api(base_url, case_id, timeout=20):
+    url = case_detail_url(base_url, case_id)
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            raw = res.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"案件接口请求失败：HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"案件接口请求失败：{exc.reason}") from exc
+    try:
+        body = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError("案件接口返回不是合法 JSON。") from exc
+    if isinstance(body, dict):
+        code = body.get("code")
+        if code not in (None, 0, "0"):
+            raise ValueError(str(body.get("msg") or body.get("message") or f"案件接口返回 code={code}"))
+        data = body.get("data", body)
+    else:
+        data = body
+    if not isinstance(data, dict):
+        raise ValueError("案件接口返回格式不正确：未找到案件详情对象。")
+    return {"url": url, "caseId": str(case_id).strip(), "data": data}
 
 
 def gold_row_pending(row):
@@ -1801,6 +1841,15 @@ HTML = r"""
     .module-menu.collapsed .module-menu-head { justify-content:center; }
     .module-menu.collapsed .module-tab { justify-content:center; padding-left:6px; padding-right:6px; }
     .module-menu.collapsed .module-menu-toggle { width:100%; padding-left:2px; padding-right:2px; }
+    .volume-block { display:grid; gap:5px; }
+    .volume-switch { width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px; text-align:left; background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:9px; font-weight:800; }
+    .volume-switch.active { background:var(--blue); border-color:var(--blue); color:#fff; }
+    .volume-switch .volume-arrow { color:inherit; font-size:14px; }
+    .module-submenu { display:grid; gap:3px; padding:0 0 5px 8px; }
+    .module-menu.collapsed .volume-switch { justify-content:center; padding-left:6px; padding-right:6px; }
+    .module-menu.collapsed .volume-name,
+    .module-menu.collapsed .volume-arrow,
+    .module-menu.collapsed .module-submenu { display:none; }
     .module-content { min-width:0; width:100%; }
     .module-panel { min-width:0; animation:module-enter .28s ease both; }
     @keyframes module-enter { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
@@ -1811,6 +1860,19 @@ HTML = r"""
     .module-heading { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; margin-bottom:12px; }
     .module-heading h2 { margin:0; font-size:18px; }
     .module-heading p { margin:5px 0 0; color:var(--muted); font-size:12px; line-height:1.45; }
+    .case-panel { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px; }
+    .case-panel-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:10px; }
+    .case-panel-title { font-weight:800; }
+    .case-panel-subtitle { margin-top:3px; color:var(--muted); font-size:12px; line-height:1.45; }
+    .case-fetch-grid { display:grid; grid-template-columns:minmax(260px, 1fr) minmax(280px, 1.2fr) auto; gap:10px; align-items:end; }
+    .case-fetch-grid button { width:auto; white-space:nowrap; }
+    .case-info-grid { display:grid; grid-template-columns:repeat(4, minmax(150px, 1fr)); gap:8px; margin-top:12px; }
+    .case-info-item { padding:9px 10px; border:1px solid var(--line); border-radius:6px; background:var(--soft); min-width:0; }
+    .case-info-label { color:var(--muted); font-size:11px; margin-bottom:3px; }
+    .case-info-value { font-weight:800; line-height:1.4; word-break:break-word; }
+    .case-template { margin-top:10px; padding:10px 12px; border-left:5px solid var(--blue); background:var(--blue-soft); border-radius:6px; line-height:1.55; }
+    .case-template b { color:var(--blue-dark); }
+    .identity-placeholder { padding:34px; border:1px dashed var(--line); border-radius:8px; color:var(--muted); text-align:center; background:var(--surface); }
     .annotation-heading { position:relative; overflow:hidden; padding:18px 20px; border:1px solid #dbe7f7; border-radius:8px; background:linear-gradient(110deg, #f8fbff, #eef5ff); }
     .annotation-heading::after { content:""; position:absolute; right:28px; top:-36px; width:110px; height:110px; border:1px solid rgba(59,130,246,.18); border-radius:50%; box-shadow:0 0 0 14px rgba(59,130,246,.04), 0 0 0 28px rgba(59,130,246,.025); }
     .annotation-heading .module-heading { position:relative; z-index:1; margin:0; }
@@ -2427,6 +2489,10 @@ HTML = r"""
       .module-menu-title { display:none; }
       .module-menu-toggle { flex:0 0 40px; }
       .module-tab { width:auto; flex:0 0 auto; white-space:nowrap; }
+      .volume-block { display:flex; flex-direction:row; gap:6px; }
+      .volume-switch { width:auto; white-space:nowrap; }
+      .module-submenu { display:flex; flex-direction:row; padding:0; }
+      .case-fetch-grid, .case-info-grid { grid-template-columns:1fr; }
       .workspace { grid-template-columns: 1fr; }
       .sidebar { position:relative; top:0; height:auto; min-height:0; max-height:300px; }
       .annotation-controls { grid-template-columns:1fr; }
@@ -2460,13 +2526,37 @@ HTML = r"""
         <div class="module-menu-head">
           <button id="toggleModuleMenu" class="module-menu-toggle" title="收起菜单" aria-label="收起菜单" aria-expanded="true" onclick="toggleModuleMenu()">‹</button>
         </div>
-        <button id="module-annotation" class="module-tab active" onclick="setModule('annotation')"><span class="module-icon">✎</span><span class="module-label">规则标准</span></button>
-        <button id="module-data" class="module-tab" onclick="setModule('data')"><span class="module-icon">⇣</span><span class="module-label">数据获取</span></button>
-        <button id="module-workbench" class="module-tab" onclick="setModule('workbench')"><span class="module-icon">▦</span><span class="module-label">复核工作台</span></button>
-        <button id="module-stats" class="module-tab" onclick="setModule('stats')"><span class="module-icon">▤</span><span class="module-label">专项统计</span></button>
-        <button id="module-history" class="module-tab" onclick="setModule('history')"><span class="module-icon">↻</span><span class="module-label">比对历史</span></button>
+        <div class="volume-block">
+          <button id="volume-procedure" class="volume-switch active" onclick="setVolume('procedure')"><span class="module-icon">▣</span><span class="volume-name">程序卷</span><span class="volume-arrow">▾</span></button>
+          <div id="procedureSubmenu" class="module-submenu">
+            <button id="module-annotation" class="module-tab active" onclick="setModule('annotation')"><span class="module-icon">✎</span><span class="module-label">规则标注</span></button>
+            <button id="module-data" class="module-tab" onclick="setModule('data')"><span class="module-icon">⇣</span><span class="module-label">数据获取</span></button>
+            <button id="module-workbench" class="module-tab" onclick="setModule('workbench')"><span class="module-icon">▦</span><span class="module-label">复核工作台</span></button>
+            <button id="module-stats" class="module-tab" onclick="setModule('stats')"><span class="module-icon">▤</span><span class="module-label">专项统计</span></button>
+            <button id="module-history" class="module-tab" onclick="setModule('history')"><span class="module-icon">↻</span><span class="module-label">比对历史</span></button>
+          </div>
+        </div>
+        <div class="volume-block">
+          <button id="volume-identity" class="volume-switch" onclick="setVolume('identity')"><span class="module-icon">◇</span><span class="volume-name">主体身份卷</span><span class="volume-arrow">▾</span></button>
+        </div>
       </nav>
       <div class="module-content">
+    <section class="case-panel" id="caseInfoPanel">
+      <div class="case-panel-head">
+        <div>
+          <div class="case-panel-title" id="casePanelTitle">程序卷 / 案件信息</div>
+          <div class="case-panel-subtitle">先根据 caseId 获取案件基础信息，再按案件性质和案件类型推荐模板。</div>
+        </div>
+        <span class="status" id="caseInfoStatus">未获取案件信息</span>
+      </div>
+      <div class="case-fetch-grid">
+        <div><label>caseId</label><input id="caseInfoCaseId" placeholder="输入 caseId"></div>
+        <div><label>案件详情接口</label><input id="caseInfoBaseUrl" placeholder="案件详情接口地址"></div>
+        <div><button onclick="fetchCaseInfo()">获取案件信息</button></div>
+      </div>
+      <div id="caseInfoContent" class="case-info-grid hide"></div>
+      <div id="caseTemplateResult" class="case-template hide"></div>
+    </section>
     <section id="dataModule" class="module-panel hide">
       <div class="module-heading">
         <div>
@@ -2740,6 +2830,15 @@ HTML = r"""
         </section>
       </div>
     </section>
+    <section id="identityModule" class="module-panel hide">
+      <div class="module-heading">
+        <div>
+          <h2>主体身份卷</h2>
+          <p>当前只开放入口和案件信息获取；规则标注、数据获取、复核工作台、专项统计和比对历史后续接入。</p>
+        </div>
+      </div>
+      <div class="identity-placeholder">主体身份卷功能待接入。请先在上方输入 caseId 获取案件基础信息。</div>
+    </section>
     <section id="statsModule" class="module-panel hide">
       <div class="module-heading">
         <div>
@@ -2837,7 +2936,9 @@ HTML = r"""
     let selectedSourceMaterial = "all";
     let pickerState = null;
     const PICKER_PAGE_SIZE = 5;
+    let activeVolume = localStorage.getItem('matchingToolActiveVolume') || 'procedure';
     let activeModule = 'annotation';
+    let currentCaseInfo = null;
     let historyItems = [];
     let moduleMenuCollapsed = false;
     let materialsCollapsed = false;
@@ -2867,7 +2968,8 @@ HTML = r"""
     setTheme(localStorage.getItem('matchingToolTheme') || 'review');
     setModuleMenuCollapsed(localStorage.getItem('matchingToolModuleMenuCollapsed') === '1');
     setMaterialsCollapsed(localStorage.getItem('matchingToolMaterialsCollapsed') === '1');
-    setModule('annotation');
+    initCaseInfoControls();
+    setVolume(activeVolume, false);
     setAnalysisVisibility(false);
     initModelSourceControls();
     updateFileReadyState();
@@ -2942,6 +3044,110 @@ HTML = r"""
     }
     function toggleMaterials() {
       setMaterialsCollapsed(!materialsCollapsed);
+    }
+    function initCaseInfoControls() {
+      const input = document.getElementById('caseInfoBaseUrl');
+      if (input) {
+        input.value = localStorage.getItem('matchingToolCaseDetailApi') || defaults.caseDetailApi || '';
+        input.addEventListener('input', () => localStorage.setItem('matchingToolCaseDetailApi', input.value));
+      }
+    }
+    function setVolume(volume, keepModule=true) {
+      activeVolume = volume === 'identity' ? 'identity' : 'procedure';
+      localStorage.setItem('matchingToolActiveVolume', activeVolume);
+      document.getElementById('volume-procedure')?.classList.toggle('active', activeVolume === 'procedure');
+      document.getElementById('volume-identity')?.classList.toggle('active', activeVolume === 'identity');
+      document.getElementById('procedureSubmenu')?.classList.toggle('hide', activeVolume !== 'procedure');
+      const title = document.getElementById('casePanelTitle');
+      if (title) title.textContent = `${activeVolume === 'procedure' ? '程序卷' : '主体身份卷'} / 案件信息`;
+      if (activeVolume === 'identity') {
+        setModule('identity');
+      } else if (!keepModule || activeModule === 'identity') {
+        setModule('annotation');
+      } else {
+        setModule(activeModule);
+      }
+      renderCaseInfo();
+    }
+    function caseText(value) {
+      return text(value).trim();
+    }
+    function detectProcedureTemplate(caseInfo) {
+      const haystack = [
+        caseInfo.caseNature,
+        caseInfo.nature,
+        caseInfo.caseKinds,
+        caseInfo.caseKindNames,
+        caseInfo.caseType,
+        caseInfo.caseTypeConfirm,
+        caseInfo.sourceType,
+        caseInfo.violationType,
+        caseInfo.dutyCrime,
+        caseInfo.name,
+      ].map(value => Array.isArray(value) ? value.join('、') : text(value)).join(' ');
+      const isLz = Number(caseInfo.isLz || 0) === 1 || Number(caseInfo.isExtendLz || 0) === 1 || /留置/.test(haystack);
+      const isDiscipline = /违纪|职务违法|审查调查|初核/.test(haystack);
+      const isTown = /乡镇|镇街|街道/.test(haystack);
+      const isDispatched = /派驻/.test(haystack);
+      if (isLz) return {name:'自办留置模板', reason:'命中优先级：自办留置。当前依据包含 isLz/isExtendLz 或“留置”关键词。'};
+      if (isDiscipline) return {name:'自办违纪模板', reason:'命中优先级：自办违纪。当前依据包含违纪、职务违法、审查调查或初核关键词。'};
+      if (isTown) return {name:'乡镇模板', reason:'命中优先级：乡镇。当前依据包含乡镇、镇街或街道关键词。'};
+      if (isDispatched) return {name:'派驻模板', reason:'命中优先级：派驻。当前依据包含派驻关键词。'};
+      return {name:'待人工选择', reason:'暂未命中已配置规则，后续可补充具体判断依据。'};
+    }
+    function renderCaseInfo() {
+      const infoWrap = document.getElementById('caseInfoContent');
+      const templateWrap = document.getElementById('caseTemplateResult');
+      const status = document.getElementById('caseInfoStatus');
+      if (!infoWrap || !templateWrap) return;
+      if (!currentCaseInfo) {
+        infoWrap.classList.add('hide');
+        templateWrap.classList.add('hide');
+        if (status) status.textContent = '未获取案件信息';
+        return;
+      }
+      const fileCount = Array.isArray(currentCaseInfo.fileList) ? currentCaseInfo.fileList.length : 0;
+      const fields = [
+        ['案件名称', currentCaseInfo.name],
+        ['案件性质', currentCaseInfo.caseNature],
+        ['案件类型', currentCaseInfo.caseType],
+        ['案件确认类型', currentCaseInfo.caseTypeConfirm],
+        ['是否留置', Number(currentCaseInfo.isLz || 0) === 1 ? '是' : '否'],
+        ['被审查人', currentCaseInfo.reviewName],
+        ['职务', currentCaseInfo.reviewPosition],
+        ['职级', currentCaseInfo.reviewRank],
+        ['身份', currentCaseInfo.civilServant],
+        ['特殊身份', currentCaseInfo.specialIdentity],
+        ['违纪违法类型', currentCaseInfo.violationType],
+        ['材料数量', fileCount],
+      ];
+      infoWrap.innerHTML = fields.map(([label, value]) => `<div class="case-info-item"><div class="case-info-label">${escapeHtml(label)}</div><div class="case-info-value">${escapeHtml(caseText(value) || '—')}</div></div>`).join('');
+      infoWrap.classList.remove('hide');
+      if (activeVolume === 'procedure') {
+        const detected = detectProcedureTemplate(currentCaseInfo);
+        templateWrap.innerHTML = `<b>程序卷推荐模板：${escapeHtml(detected.name)}</b><br>${escapeHtml(detected.reason)}<br><span class="small">当前优先级：自办留置 &gt; 自办违纪 &gt; 乡镇 &gt; 派驻</span>`;
+      } else {
+        templateWrap.innerHTML = `<b>主体身份卷：</b>案件信息已获取，具体模板和业务功能待接入。`;
+      }
+      templateWrap.classList.remove('hide');
+      if (status) status.textContent = `已获取 caseId=${caseText(currentCaseInfo.id || currentCaseInfo.caseId)}`;
+    }
+    async function fetchCaseInfo() {
+      const caseId = document.getElementById('caseInfoCaseId')?.value.trim();
+      const baseUrl = document.getElementById('caseInfoBaseUrl')?.value.trim();
+      if (!caseId) { showFailure('请先填写 caseId。'); return; }
+      const status = document.getElementById('caseInfoStatus');
+      if (status) status.textContent = '正在获取案件信息...';
+      try {
+        const result = await getJson(`/api/case/detail?caseId=${encodeURIComponent(caseId)}&baseUrl=${encodeURIComponent(baseUrl || defaults.caseDetailApi || '')}`);
+        currentCaseInfo = result.data || {};
+        currentCaseInfo.caseId = result.caseId || currentCaseInfo.id || caseId;
+        renderCaseInfo();
+        showSuccess('案件信息获取成功。');
+      } catch (err) {
+        if (status) status.textContent = err.message;
+        showFailure(`案件信息获取失败：${err.message}`);
+      }
     }
     function setAnalysisVisibility(ready) {
       const visible = Boolean(ready);
@@ -3021,11 +3227,21 @@ HTML = r"""
     }
     function setModule(name) {
       activeModule = name;
-      for (const moduleName of ['workbench', 'annotation', 'data', 'stats', 'history']) {
+      for (const moduleName of ['workbench', 'annotation', 'data', 'stats', 'history', 'identity']) {
         const panel = document.getElementById(`${moduleName}Module`);
         const tab = document.getElementById(`module-${moduleName}`);
         if (panel) panel.classList.toggle('hide', moduleName !== name);
         if (tab) tab.classList.toggle('active', moduleName === name);
+      }
+      if (name !== 'identity' && activeVolume !== 'procedure') {
+        activeVolume = 'procedure';
+        localStorage.setItem('matchingToolActiveVolume', activeVolume);
+        document.getElementById('volume-procedure')?.classList.add('active');
+        document.getElementById('volume-identity')?.classList.remove('active');
+        document.getElementById('procedureSubmenu')?.classList.remove('hide');
+        const title = document.getElementById('casePanelTitle');
+        if (title) title.textContent = '程序卷 / 案件信息';
+        renderCaseInfo();
       }
       if (name === 'workbench') refreshWorkbenchDatasetInfo();
       if (name === 'stats') renderStatsModule();
@@ -5794,6 +6010,17 @@ class ToolHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(json.loads(path.read_text(encoding="utf-8")))
             return
+        if parsed.path == "/api/case/detail":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                result = fetch_case_detail_from_api(
+                    query.get("baseUrl", [DEFAULT_CASE_DETAIL_API])[0] or DEFAULT_CASE_DETAIL_API,
+                    query.get("caseId", [""])[0],
+                )
+                self.send_json(result)
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
         if parsed.path not in {"/", "/index.html"}:
             self.send_json({"error": "not found"}, 404)
             return
@@ -5801,6 +6028,7 @@ class ToolHandler(BaseHTTPRequestHandler):
             "outputPath": str(DEFAULT_OUTPUT),
             "errorReasonOutputPath": str(DEFAULT_ERROR_REASON_OUTPUT),
             "modelResultApi": DEFAULT_MODEL_RESULT_API,
+            "caseDetailApi": DEFAULT_CASE_DETAIL_API,
         }
         html = HTML.replace("__DEFAULTS__", json.dumps(defaults, ensure_ascii=False))
         self.send_response(200)
