@@ -20,6 +20,9 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from evidence_evaluation import EvidenceEvaluationService
+from subject_identity_evaluation import SubjectIdentityEvaluationService
+
 
 # Keep runtime data beside the project so the tool remains portable when moved.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,6 +34,8 @@ DB_PATH = BASE_DIR / "work" / "review_tool.db"
 DEFAULT_OUTPUT = OUTPUT_DIR / "自办违法测2_复核后标注统计.xlsx"
 DEFAULT_ERROR_REASON_OUTPUT = OUTPUT_DIR / "错误原因明细.xlsx"
 DEFAULT_HISTORY_OUTPUT = OUTPUT_DIR / "比对历史导出.xlsx"
+EVIDENCE_EVALUATION = EvidenceEvaluationService(DB_PATH, OUTPUT_DIR)
+SUBJECT_IDENTITY_EVALUATION = SubjectIdentityEvaluationService(DB_PATH, OUTPUT_DIR)
 RULE_ANNOTATION_OUTPUT_PREFIX = "规则金标准标注"
 ANALYSIS_JOBS = {}
 ANALYSIS_JOBS_LOCK = threading.Lock()
@@ -200,6 +205,8 @@ def init_app_db():
             conn.execute("ALTER TABLE batch_cases ADD COLUMN excel_file_name TEXT")
         if "excel_path" not in existing_columns:
             conn.execute("ALTER TABLE batch_cases ADD COLUMN excel_path TEXT")
+    EVIDENCE_EVALUATION.init_db()
+    SUBJECT_IDENTITY_EVALUATION.init_db()
 
 
 def now_text():
@@ -1824,19 +1831,25 @@ HTML = r"""
     .analysis-progress-track { width:150px; height:8px; border-radius:999px; background:var(--soft); overflow:hidden; border:1px solid var(--line); }
     .analysis-progress-bar { width:0%; height:100%; border-radius:999px; background:var(--blue); transition:width .2s ease; }
     .analysis-progress-text { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .app-layout { display:grid; grid-template-columns:176px minmax(0,1fr); gap:16px; align-items:start; width:auto; min-width:0; }
+    .app-layout { display:grid; grid-template-columns:216px minmax(0,1fr); gap:16px; align-items:start; width:auto; min-width:0; }
     .app-layout.module-menu-collapsed { grid-template-columns:54px minmax(0,1fr); }
-    .module-menu { position:sticky; top:18px; display:flex; flex-direction:column; gap:6px; padding:10px; background:var(--soft); border-radius:8px; }
+    .module-menu { position:sticky; top:18px; min-width:0; overflow:hidden; display:flex; flex-direction:column; gap:6px; padding:10px; background:var(--soft); border-radius:8px; }
     .module-menu-head { display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:4px 4px 8px; color:var(--muted); font-size:12px; font-weight:800; }
     .module-menu-title { letter-spacing:.04em; }
-    .module-tab { width:100%; display:flex; align-items:center; gap:7px; text-align:left; background:transparent; color:var(--muted); border:0; border-radius:6px; padding:9px 9px; white-space:nowrap; }
+    .module-tab { width:100%; min-width:0; display:flex; align-items:center; gap:7px; text-align:left; background:transparent; color:var(--muted); border:0; border-radius:6px; padding:9px; white-space:nowrap; }
     .module-icon { width:19px; flex:0 0 19px; text-align:center; font-size:15px; }
+    .module-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }
     .module-tab:hover, .module-tab.active { color:var(--blue); background:var(--surface); }
     .module-tab.active { background:var(--blue); color:#fff; }
+    .module-status { flex:0 0 auto; margin-left:auto; padding:2px 6px; border-radius:999px; background:rgba(148,163,184,.18); font-size:9px; line-height:1.4; white-space:nowrap; }
+    .module-tab.active .module-status { background:rgba(255,255,255,.22); }
+    .module-tab:focus-visible, .volume-switch:focus-visible { outline:2px solid var(--blue-dark); outline-offset:-2px; }
+    .module-tab.active:focus-visible, .volume-switch.active:focus-visible { outline-color:rgba(255,255,255,.9); }
     .module-menu-toggle { width:40px; min-width:40px; min-height:34px; padding:0; background:transparent; color:var(--muted); font-size:22px; line-height:1; }
     .module-menu-toggle:hover { background:var(--surface); color:var(--ink); }
     .module-menu.collapsed .module-menu-title,
     .module-menu.collapsed .module-label,
+    .module-menu.collapsed .module-status,
     .module-menu.collapsed .module-menu-toggle span { display:none; }
     .module-menu.collapsed .module-menu-head { justify-content:center; }
     .module-menu.collapsed .module-tab { justify-content:center; padding-left:6px; padding-right:6px; }
@@ -1852,6 +1865,43 @@ HTML = r"""
     .module-menu.collapsed .module-submenu { display:none; }
     .module-content { min-width:0; width:100%; }
     .module-panel { min-width:0; animation:module-enter .28s ease both; }
+    .evidence-grid { display:grid; grid-template-columns:320px minmax(0,1fr); gap:14px; align-items:start; }
+    .evidence-grid.dataset-collapsed { grid-template-columns:58px minmax(0,1fr); }
+    .evidence-panel { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px; }
+    .evidence-panel h3 { margin:0 0 10px; font-size:15px; }
+    .evidence-dataset-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+    .evidence-dataset-head h3 { margin:0; }
+    .evidence-collapse-button { width:34px; min-width:34px; height:34px; padding:0; font-size:22px; line-height:1; background:transparent; color:var(--muted); border-color:var(--line); }
+    .evidence-collapse-button:hover { background:var(--soft); color:var(--blue); }
+    .evidence-dataset-panel.collapsed { padding:10px; }
+    .evidence-dataset-panel.collapsed .evidence-dataset-head { justify-content:center; }
+    .evidence-dataset-panel.collapsed .evidence-dataset-head h3,
+    .evidence-dataset-panel.collapsed .evidence-dataset-body { display:none; }
+    .evidence-form { display:grid; gap:9px; }
+    .evidence-form-row { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; }
+    .evidence-actions { display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
+    .evidence-actions button { width:auto; }
+    .evidence-list { display:grid; gap:7px; margin-top:12px; }
+    .evidence-list-card { display:grid; grid-template-columns:minmax(0,1fr) 36px; gap:6px; align-items:stretch; }
+    .evidence-list-item { width:100%; text-align:left; background:var(--soft); color:var(--ink); border-color:var(--line); }
+    .evidence-list-card.active .evidence-list-item { background:var(--blue); color:#fff; border-color:var(--blue); }
+    .evidence-delete-button { width:36px; min-width:36px; padding:0; background:#fff; color:#dc2626; border-color:#fecaca; font-size:18px; }
+    .evidence-delete-button:hover { background:#fee2e2; border-color:#ef4444; }
+    .evidence-list-meta { display:block; margin-top:3px; opacity:.72; font-size:11px; font-weight:400; }
+    .evidence-tabs { display:flex; gap:6px; margin-bottom:12px; border-bottom:1px solid var(--line); padding-bottom:8px; }
+    .evidence-tabs button { width:auto; background:transparent; color:var(--muted); border-color:transparent; }
+    .evidence-tabs button.active { color:var(--blue); background:var(--blue-soft); }
+    .evidence-table-wrap { overflow:auto; max-height:520px; border:1px solid var(--line); border-radius:7px; }
+    .evidence-table { min-width:1250px; }
+    .evidence-table input, .evidence-table select, .evidence-table textarea { min-width:120px; padding:6px; font-size:12px; }
+    .evidence-table textarea { width:240px; min-height:54px; resize:vertical; }
+    .evidence-table button { width:auto; padding:5px 8px; font-size:12px; }
+    .evidence-report-cards { display:grid; grid-template-columns:repeat(4,minmax(140px,1fr)); gap:9px; margin:12px 0; }
+    .evidence-report-card { padding:11px; background:var(--soft); border-radius:7px; }
+    .evidence-report-card b { display:block; margin-top:4px; font-size:20px; }
+    .evidence-run-list { display:flex; gap:7px; flex-wrap:wrap; margin-top:10px; }
+    .evidence-run-list button { width:auto; background:var(--soft); color:var(--ink); border-color:var(--line); }
+    .evidence-empty { padding:34px; text-align:center; color:var(--muted); background:var(--soft); border-radius:7px; }
     @keyframes module-enter { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
     .analysis-empty { background:var(--blue-soft); border-left:5px solid var(--blue); border-radius:8px; padding:30px 32px; margin-bottom:14px; }
     .analysis-empty-kicker { color:var(--blue-dark); font-size:12px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
@@ -2251,6 +2301,9 @@ HTML = r"""
     .module-menu { gap:6px; padding:10px; background:var(--soft); border-radius:8px; }
     .module-menu-head { padding:4px 4px 8px; background:transparent; color:var(--muted); }
     .module-tab { min-height:44px; padding:9px 12px; background:transparent; color:var(--muted); border:0; border-radius:6px; }
+    .module-submenu .module-tab { padding-left:8px; padding-right:8px; gap:5px; font-size:13px; }
+    .module-submenu .module-icon { width:17px; flex-basis:17px; font-size:14px; }
+    .module-submenu .module-status { padding:1px 4px; font-size:8px; }
     .module-tab:hover { background:#e5e7eb; color:var(--ink); }
     .module-tab.active { background:var(--blue); color:#fff; }
     .module-menu-toggle { min-height:34px; background:transparent; color:var(--muted); }
@@ -2478,7 +2531,7 @@ HTML = r"""
       header { padding:10px 20px; }
       main { padding:18px 20px 40px; }
       .app-layout { margin-left:-20px; margin-right:-20px; }
-      .app-layout { grid-template-columns:160px minmax(0,1fr); gap:14px; }
+      .app-layout { grid-template-columns:200px minmax(0,1fr); gap:14px; }
       .app-layout.module-menu-collapsed { grid-template-columns:50px minmax(0,1fr); }
       .workspace { grid-template-columns:minmax(196px, 20vw) minmax(0,1fr); }
       th, td { padding:8px; }
@@ -2511,6 +2564,8 @@ HTML = r"""
       .history-save { width:100%; min-width:0; }
       .history-save > button { width:auto; }
       .history-save-time-grid { grid-template-columns:1fr; }
+      .evidence-grid { grid-template-columns:1fr; }
+      .evidence-form-row, .evidence-report-cards { grid-template-columns:1fr; }
     }
   </style>
 </head>
@@ -2542,6 +2597,29 @@ HTML = r"""
         </div>
         <div class="volume-block">
           <button id="volume-identity" class="volume-switch" onclick="setVolume('identity')"><span class="module-icon">◇</span><span class="volume-name">主体身份卷</span><span class="volume-arrow">▾</span></button>
+          <div id="identitySubmenu" class="module-submenu hide">
+            <button id="module-subject-gold" class="module-tab" onclick="openSubjectSection('gold')"><span class="module-icon">✎</span><span class="module-label">黄金标准</span></button>
+            <button id="module-subject-data" class="module-tab" onclick="openSubjectSection('data')"><span class="module-icon">⇣</span><span class="module-label">数据获取</span></button>
+            <button id="module-subject-file" class="module-tab" onclick="openSubjectSection('file')"><span class="module-icon">▧</span><span class="module-label">文件分类评测</span></button>
+            <button id="module-subject-record" class="module-tab" onclick="openSubjectSection('record')"><span class="module-icon">▤</span><span class="module-label">职位抽取评测</span></button>
+            <button id="module-subject-align" class="module-tab" onclick="openSubjectSection('align')"><span class="module-icon">⇄</span><span class="module-label">任职对齐评测</span></button>
+            <button id="module-subject-material" class="module-tab" onclick="openSubjectSection('material')"><span class="module-icon">⌕</span><span class="module-label">身份材料评测</span></button>
+            <button id="module-subject-rule" class="module-tab" onclick="openSubjectSection('rule')"><span class="module-icon">✓</span><span class="module-label">业务规则评测</span></button>
+            <button id="module-subject-report" class="module-tab" onclick="openSubjectSection('report')"><span class="module-icon">▦</span><span class="module-label">综合报告</span></button>
+          </div>
+        </div>
+        <div class="volume-block">
+          <button id="volume-evidence" class="volume-switch" onclick="setVolume('evidence')"><span class="module-icon">◎</span><span class="volume-name">违纪违法卷</span><span class="volume-arrow">▾</span></button>
+          <div id="evidenceSubmenu" class="module-submenu hide">
+            <button id="module-violation-gold" class="module-tab" onclick="openViolationSection('gold')"><span class="module-icon">✎</span><span class="module-label">黄金标准</span><span class="module-status" id="violation-status-gold">未准备</span></button>
+            <button id="module-violation-data" class="module-tab" onclick="openViolationSection('data')"><span class="module-icon">⇣</span><span class="module-label">数据获取</span><span class="module-status" id="violation-status-data">未准备</span></button>
+            <button id="module-violation-event" class="module-tab" onclick="openViolationSection('event')"><span class="module-icon">◉</span><span class="module-label">事件抽取评测</span><span class="module-status" id="violation-status-event">待评测</span></button>
+            <button id="module-violation-verbal" class="module-tab" onclick="openViolationSection('verbal')"><span class="module-icon">◌</span><span class="module-label">言证问题评测</span><span class="module-status" id="violation-status-verbal">待评测</span></button>
+            <button id="module-violation-documentary" class="module-tab" onclick="openViolationSection('documentary')"><span class="module-icon">▧</span><span class="module-label">书证问题评测</span><span class="module-status" id="violation-status-documentary">待评测</span></button>
+            <button id="module-violation-quality" class="module-tab" onclick="openViolationSection('quality')"><span class="module-icon">≋</span><span class="module-label">事件质量专项</span><span class="module-status" id="violation-status-quality">待评测</span></button>
+            <button id="module-violation-review" class="module-tab" onclick="openViolationSection('review')"><span class="module-icon">✓</span><span class="module-label">人工匹配复核</span><span class="module-status" id="violation-status-review">未准备</span></button>
+            <button id="module-violation-report" class="module-tab" onclick="openViolationSection('report')"><span class="module-icon">▦</span><span class="module-label">综合报告</span><span class="module-status" id="violation-status-report">未准备</span></button>
+          </div>
         </div>
       </nav>
       <div class="module-content">
@@ -2843,11 +2921,111 @@ HTML = r"""
     <section id="identityModule" class="module-panel hide">
       <div class="module-heading">
         <div>
-          <h2>主体身份卷</h2>
-          <p>当前只开放入口和案件信息获取；规则标注、数据获取、复核工作台、专项统计和比对历史后续接入。</p>
+          <h2>主体身份卷分阶段评测</h2>
+          <p>按文件分类、职位抽取、任职对齐、身份及材料匹配四个阶段，对人工黄金标准与系统输出进行离线比对。</p>
+        </div>
+        <div class="evidence-actions"><button class="secondary" onclick="downloadSubjectTemplate()">下载黄金模板</button><button class="secondary" onclick="loadSubjectDatasets(true)">刷新</button></div>
+      </div>
+      <div class="evidence-grid" id="subjectGrid">
+        <aside class="evidence-panel evidence-dataset-panel" id="subjectDatasetPanel">
+          <div class="evidence-dataset-head"><h3>评测集</h3><button class="evidence-collapse-button" id="subjectCollapseButton" title="收起评测集" aria-label="收起评测集" onclick="toggleSubjectDatasetPanel()">‹</button></div>
+          <div class="evidence-dataset-body">
+            <div class="evidence-form" style="margin-top:12px">
+              <div><label>名称</label><input id="subjectDatasetName" placeholder="例如：主体身份复杂案件第一期"></div>
+              <div class="evidence-form-row"><div><label>版本</label><input id="subjectDatasetVersion" value="v1.0"></div><div><label>状态</label><select id="subjectDatasetStatus"><option value="draft">草稿</option><option value="frozen">冻结</option></select></div></div>
+              <div><label>说明</label><textarea id="subjectDatasetDescription" placeholder="案件范围和标注口径"></textarea></div>
+              <div class="evidence-actions"><button onclick="saveSubjectDataset()">保存评测集</button><button class="secondary" onclick="newSubjectDataset()">新建</button></div>
+            </div>
+            <div id="subjectDatasetList" class="evidence-list"></div>
+          </div>
+        </aside>
+        <section class="evidence-panel">
+          <div id="subjectNoDataset" class="evidence-empty">请先创建或选择一个主体身份评测集。</div>
+          <div id="subjectWorkspace" class="hide">
+            <div class="module-heading"><div><h2 id="subjectSectionTitle">黄金标准</h2><p id="subjectSectionDescription">管理主体身份卷人工黄金标准。</p></div></div>
+            <div id="subjectGoldPane">
+              <div class="evidence-actions"><input id="subjectGoldFile" type="file" accept=".xlsx" style="width:auto"><button onclick="importSubjectGold()">导入Excel并覆盖</button><span class="status" id="subjectGoldStatus"></span></div>
+              <div id="subjectGoldSummary" class="evidence-report-cards"></div>
+              <div class="small">模板包含：案件信息、文件分类、职位抽取、任职分组、身份材料、业务规则。建议两人独立标注后再导入已确认版本。</div>
+            </div>
+            <div id="subjectDataPane" class="hide">
+              <div class="evidence-form">
+                <div class="evidence-form-row"><div><label>评测名称</label><input id="subjectRunName"></div><div><label>模型版本</label><input id="subjectModelVersion"></div><div><label>系统版本</label><input id="subjectSystemVersion"></div></div>
+                <div class="evidence-form-row"><div><label>宽松匹配阈值</label><input id="subjectThreshold" type="number" min="0.3" max="0.95" step="0.01" value="0.58"></div><div><label>离线系统输出JSON</label><input id="subjectResultFile" type="file" accept=".json,.txt"></div></div>
+                <div class="evidence-form-row"><div><label>在线接口根地址或 identity 地址</label><input id="subjectApiBaseUrl" placeholder="http://host:port"></div><div><label>caseId</label><input id="subjectApiCaseId"></div><div><label>bizId</label><input id="subjectApiBizId"></div></div>
+                <div class="evidence-actions"><button class="secondary" onclick="fetchSubjectProgress()">查询四阶段进度</button><button class="secondary" onclick="fetchSubjectIdentityResult()">拉取 identity 结果</button><span class="status" id="subjectApiStatus">可上传JSON，或从接口拉取结果。</span></div>
+                <div class="evidence-actions"><button onclick="runSubjectEvaluation()">开始分阶段评测</button><span class="status" id="subjectRunStatus"></span></div>
+              </div>
+              <h3 style="margin-top:18px">历史运行</h3><div id="subjectRunList" class="evidence-run-list"></div>
+            </div>
+            <div id="subjectFilePane" class="hide"><div id="subjectFileReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="subjectRecordPane" class="hide"><div id="subjectRecordReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="subjectAlignPane" class="hide"><div id="subjectAlignReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="subjectMaterialPane" class="hide"><div id="subjectMaterialReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="subjectRulePane" class="hide"><div id="subjectRuleReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="subjectReportPane" class="hide"><div id="subjectReportEmpty" class="evidence-empty">完成一次评测或选择历史运行后查看报告。</div><div id="subjectReport"></div></div>
+          </div>
+        </section>
+      </div>
+    </section>
+    <section id="evidenceModule" class="module-panel hide">
+      <div class="module-heading">
+        <div>
+          <h2>违纪违法卷言证书证评测</h2>
+          <p>用人工黄金标注集离线评测事件抽取、言证问题和书证问题；同时分析主体归属、事件拆分、重复及输入范围限制。</p>
+        </div>
+        <div class="evidence-actions">
+          <button class="secondary" onclick="downloadEvidenceTemplate()">下载标注模板</button>
+          <button class="secondary" onclick="loadEvidenceDatasets(true)">刷新</button>
         </div>
       </div>
-      <div class="identity-placeholder">主体身份卷功能待接入。请先在上方输入 caseId 获取案件基础信息。</div>
+      <div class="evidence-grid" id="evidenceGrid">
+        <aside class="evidence-panel evidence-dataset-panel" id="evidenceDatasetPanel">
+          <div class="evidence-dataset-head"><h3>评测集</h3><button class="evidence-collapse-button" id="evidenceCollapseButton" title="收起评测集" aria-label="收起评测集" onclick="toggleEvidenceDatasetPanel()">‹</button></div>
+          <div class="evidence-dataset-body" id="evidenceDatasetBody">
+          <div class="evidence-form" style="margin-top:12px">
+            <div><label>名称</label><input id="evidenceDatasetName" placeholder="例如：违纪违法卷第一期"></div>
+            <div class="evidence-form-row">
+              <div><label>版本</label><input id="evidenceDatasetVersion" value="v1.0"></div>
+              <div><label>状态</label><select id="evidenceDatasetStatus"><option value="draft">草稿</option><option value="frozen">冻结</option></select></div>
+            </div>
+            <div><label>说明</label><textarea id="evidenceDatasetDescription" placeholder="样本范围、标注口径等"></textarea></div>
+            <div class="evidence-actions"><button onclick="saveEvidenceDataset()">保存评测集</button><button class="secondary" onclick="newEvidenceDataset()">新建</button></div>
+          </div>
+          <div id="evidenceDatasetList" class="evidence-list"></div>
+          </div>
+        </aside>
+        <section class="evidence-panel">
+          <div id="evidenceNoDataset" class="evidence-empty">请先创建或选择一个评测集。</div>
+          <div id="evidenceWorkspace" class="hide">
+            <div class="module-heading"><div><h2 id="violationSectionTitle">黄金标准</h2><p id="violationSectionDescription">管理事件、言证问题和书证问题黄金标准。</p></div></div>
+            <div id="evidenceGoldPane">
+              <div class="evidence-actions" style="margin-bottom:10px">
+                <input id="evidenceGoldFile" type="file" accept=".xlsx" style="width:auto">
+                <button class="secondary" onclick="importEvidenceGold()">导入Excel并覆盖</button>
+                <button class="secondary" onclick="addEvidenceGoldRow()">新增一行</button>
+                <button onclick="saveEvidenceGold()">保存黄金标注</button>
+                <span class="status" id="evidenceGoldStatus"></span>
+              </div>
+              <div class="evidence-table-wrap"><table class="evidence-table"><thead><tr><th>类型</th><th>案件</th><th>材料/页码</th><th>主体</th><th>行为</th><th>时间/金额/地点/对象</th><th>原文与标准答案</th><th>事件簇/关系</th><th>关联书证/预期结论</th><th>输入限制</th><th>分组/状态</th><th>备注</th><th>操作</th></tr></thead><tbody id="evidenceGoldRows"></tbody></table></div>
+            </div>
+            <div id="evidenceDataPane" class="hide">
+              <div class="evidence-form">
+                <div class="evidence-form-row"><div><label>评测名称</label><input id="evidenceRunName" placeholder="例如：模型V2回归"></div><div><label>模型版本</label><input id="evidenceModelVersion"></div><div><label>系统版本</label><input id="evidenceSystemVersion"></div></div>
+                <div class="evidence-form-row"><div><label>提示词版本</label><input id="evidencePromptVersion"></div><div><label>宽松匹配阈值</label><input id="evidenceThreshold" type="number" min="0.3" max="0.95" step="0.01" value="0.58"></div><div><label>系统输出JSON</label><input id="evidenceResultFile" type="file" accept=".json,.txt"></div></div>
+                <div class="evidence-actions"><button onclick="runEvidenceEvaluation()">开始离线评测</button><span class="status" id="evidenceRunStatus"></span></div>
+              </div>
+              <div><h3 style="margin-top:18px">历史运行</h3><div id="evidenceRunList" class="evidence-run-list"></div></div>
+            </div>
+            <div id="evidenceEventPane" class="hide"><div id="violationEventReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="evidenceVerbalPane" class="hide"><div id="violationVerbalReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="evidenceDocumentaryPane" class="hide"><div id="violationDocumentaryReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="evidenceQualityPane" class="hide"><div id="violationQualityReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="evidenceReviewPane" class="hide"><div id="violationReviewReport" class="evidence-empty">请先在“数据获取”完成一次评测。</div></div>
+            <div id="evidenceReportPane" class="hide"><div id="evidenceReportEmpty" class="evidence-empty">完成一次评测或选择历史运行后查看报告。</div><div id="evidenceReport"></div></div>
+          </div>
+        </section>
+      </div>
     </section>
     <section id="statsModule" class="module-panel hide">
       <div class="module-heading">
@@ -2973,6 +3151,17 @@ HTML = r"""
     let modelResultSource = localStorage.getItem('matchingToolModelSource') || 'upload';
     let fetchedModelResult = null;
     let activeBatchJobId = '';
+    let evidenceDatasets = [];
+    let currentEvidenceDataset = null;
+    let currentEvidenceRun = null;
+    let activeViolationSection = localStorage.getItem('activeViolationSection') || 'gold';
+    let evidenceDatasetCollapsed = localStorage.getItem('evidenceDatasetCollapsed') === '1';
+    let subjectDatasets = [];
+    let currentSubjectDataset = null;
+    let currentSubjectRun = null;
+    let activeSubjectSection = localStorage.getItem('activeSubjectSection') || 'gold';
+    let subjectDatasetCollapsed = localStorage.getItem('subjectDatasetCollapsed') === '1';
+    let fetchedSubjectResult = null;
     const MATERIAL_PAGE_SIZE = 10;
     const HISTORY_PAGE_SIZE = 5;
     const errorReasonHeaders = ['错误原因', '来源文件', '材料类型', '对应材料名称', '所属阶段', '阶段时间顺序', '规则名称', '特殊条件', '判断规则', '错误场景', '是否触发', '是否正确', '模型是否触发', '模型是否正确', '具体问题内容'];
@@ -2984,6 +3173,8 @@ HTML = r"""
     setAnalysisVisibility(false);
     initModelSourceControls();
     updateFileReadyState();
+    setEvidenceDatasetCollapsed(evidenceDatasetCollapsed);
+    setSubjectDatasetCollapsed(subjectDatasetCollapsed);
 
     function escapeHtml(value) {
       return text(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -3064,14 +3255,19 @@ HTML = r"""
       }
     }
     function setVolume(volume, keepModule=true) {
-      activeVolume = volume === 'identity' ? 'identity' : 'procedure';
+      activeVolume = ['identity', 'evidence'].includes(volume) ? volume : 'procedure';
       localStorage.setItem('matchingToolActiveVolume', activeVolume);
       document.getElementById('volume-procedure')?.classList.toggle('active', activeVolume === 'procedure');
       document.getElementById('volume-identity')?.classList.toggle('active', activeVolume === 'identity');
+      document.getElementById('volume-evidence')?.classList.toggle('active', activeVolume === 'evidence');
       document.getElementById('procedureSubmenu')?.classList.toggle('hide', activeVolume !== 'procedure');
+      document.getElementById('identitySubmenu')?.classList.toggle('hide', activeVolume !== 'identity');
+      document.getElementById('evidenceSubmenu')?.classList.toggle('hide', activeVolume !== 'evidence');
       if (activeVolume === 'identity') {
-        setModule('identity');
-      } else if (!keepModule || activeModule === 'identity') {
+        openSubjectSection(activeSubjectSection);
+      } else if (activeVolume === 'evidence') {
+        openViolationSection(activeViolationSection);
+      } else if (!keepModule || ['identity', 'evidence'].includes(activeModule)) {
         setModule('annotation');
       } else {
         setModule(activeModule);
@@ -3259,20 +3455,34 @@ HTML = r"""
     }
     function setModule(name) {
       activeModule = name;
-      for (const moduleName of ['workbench', 'annotation', 'data', 'stats', 'history', 'identity']) {
+      for (const moduleName of ['workbench', 'annotation', 'data', 'stats', 'history', 'identity', 'evidence']) {
         const panel = document.getElementById(`${moduleName}Module`);
         const tab = document.getElementById(`module-${moduleName}`);
         if (panel) panel.classList.toggle('hide', moduleName !== name);
         if (tab) tab.classList.toggle('active', moduleName === name);
       }
-      if (name !== 'identity' && activeVolume !== 'procedure') {
+      if (!['identity', 'evidence'].includes(name) && activeVolume !== 'procedure') {
         activeVolume = 'procedure';
         localStorage.setItem('matchingToolActiveVolume', activeVolume);
         document.getElementById('volume-procedure')?.classList.add('active');
         document.getElementById('volume-identity')?.classList.remove('active');
+        document.getElementById('volume-evidence')?.classList.remove('active');
         document.getElementById('procedureSubmenu')?.classList.remove('hide');
+        document.getElementById('identitySubmenu')?.classList.add('hide');
+        document.getElementById('evidenceSubmenu')?.classList.add('hide');
         renderCaseInfo();
       }
+      if (name === 'evidence') {
+        activeVolume = 'evidence';
+        localStorage.setItem('matchingToolActiveVolume', activeVolume);
+        document.getElementById('volume-procedure')?.classList.remove('active');
+        document.getElementById('volume-identity')?.classList.remove('active');
+        document.getElementById('volume-evidence')?.classList.add('active');
+        document.getElementById('procedureSubmenu')?.classList.add('hide');
+        document.getElementById('evidenceSubmenu')?.classList.remove('hide');
+        if (!evidenceDatasets.length) loadEvidenceDatasets();
+      }
+      if (name === 'identity' && !subjectDatasets.length) loadSubjectDatasets();
       if (name === 'workbench') refreshWorkbenchDatasetInfo();
       if (name === 'stats') renderStatsModule();
       if (name === 'history') loadHistoryList();
@@ -5484,6 +5694,418 @@ HTML = r"""
         showFailure(`导出失败：${err.message}`);
       }
     }
+    function setSubjectDatasetCollapsed(collapsed) {
+      subjectDatasetCollapsed = Boolean(collapsed);
+      localStorage.setItem('subjectDatasetCollapsed', subjectDatasetCollapsed ? '1' : '0');
+      document.getElementById('subjectGrid')?.classList.toggle('dataset-collapsed', subjectDatasetCollapsed);
+      document.getElementById('subjectDatasetPanel')?.classList.toggle('collapsed', subjectDatasetCollapsed);
+      const button = document.getElementById('subjectCollapseButton');
+      if (button) { button.textContent = subjectDatasetCollapsed ? '›' : '‹'; button.title = subjectDatasetCollapsed ? '展开评测集' : '收起评测集'; button.setAttribute('aria-label', button.title); }
+    }
+    function toggleSubjectDatasetPanel() { setSubjectDatasetCollapsed(!subjectDatasetCollapsed); }
+    function openSubjectSection(name) {
+      const sections=['gold','data','file','record','align','material','rule','report'];
+      activeSubjectSection=sections.includes(name)?name:'gold'; localStorage.setItem('activeSubjectSection',activeSubjectSection);
+      if(activeVolume!=='identity') setVolume('identity'); else setModule('identity');
+      const meta={gold:['黄金标准','导入和检查六类人工黄金标准。'],data:['数据获取','上传离线JSON，或查询进度并拉取主体身份接口结果。'],file:['文件分类评测','单独查看文件分类精确率、召回率、F1及错误明细。'],record:['职位抽取评测','查看职务、职级、分工抽取及字段级准确率。'],align:['任职对齐评测','检查任职经历分组、错误拆分和错误合并。'],material:['身份材料评测','评估特殊身份、其他身份及其关联材料。'],rule:['业务规则评测','统计重点业务规则通过、不通过和未执行结果。'],report:['综合报告','汇总四阶段指标和专项风险。']};
+      document.getElementById('subjectSectionTitle').textContent=meta[activeSubjectSection][0];
+      document.getElementById('subjectSectionDescription').textContent=meta[activeSubjectSection][1];
+      for(const section of sections){document.getElementById(`subject${section[0].toUpperCase()+section.slice(1)}Pane`)?.classList.toggle('hide',section!==activeSubjectSection);document.getElementById(`module-subject-${section}`)?.classList.toggle('active',section===activeSubjectSection)}
+      renderSubjectStageReports();
+    }
+    function newSubjectDataset() {
+      currentSubjectDataset = null; currentSubjectRun = null;
+      document.getElementById('subjectDatasetName').value=''; document.getElementById('subjectDatasetVersion').value='v1.0';
+      document.getElementById('subjectDatasetStatus').value='draft'; document.getElementById('subjectDatasetDescription').value='';
+      document.getElementById('subjectNoDataset').classList.remove('hide'); document.getElementById('subjectWorkspace').classList.add('hide');
+      renderSubjectDatasetList();
+    }
+    async function loadSubjectDatasets(notify=false) {
+      try { subjectDatasets=await getJson('/api/subject-eval/datasets'); renderSubjectDatasetList();
+        if(currentSubjectDataset?.id && subjectDatasets.some(item=>item.id===currentSubjectDataset.id)) await selectSubjectDataset(currentSubjectDataset.id,false);
+        if(notify) showSuccess(`已刷新 ${subjectDatasets.length} 个主体身份评测集。`);
+      } catch(err){ showFailure(`读取主体身份评测集失败：${err.message}`); }
+    }
+    function renderSubjectDatasetList() {
+      const wrap=document.getElementById('subjectDatasetList'); if(!wrap)return;
+      wrap.innerHTML=subjectDatasets.length?subjectDatasets.map(item=>`<div class="evidence-list-card ${currentSubjectDataset?.id===item.id?'active':''}"><button class="evidence-list-item" onclick="selectSubjectDataset('${item.id}')">${escapeHtml(item.name)} · ${escapeHtml(item.version)}<span class="evidence-list-meta">${item.status==='frozen'?'已冻结':'草稿'}｜黄金标准 ${item.hasGold?'已导入':'未导入'}｜运行 ${item.runCount}</span></button><button class="evidence-delete-button" title="删除评测集" aria-label="删除评测集 ${escapeHtml(item.name)}" onclick="deleteSubjectDataset('${item.id}')">×</button></div>`).join(''):'<div class="status">还没有主体身份评测集。</div>';
+    }
+    async function saveSubjectDataset() {
+      try { const result=await post('/api/subject-eval/dataset/save',{id:currentSubjectDataset?.id||'',name:document.getElementById('subjectDatasetName').value.trim(),version:document.getElementById('subjectDatasetVersion').value.trim(),status:document.getElementById('subjectDatasetStatus').value,description:document.getElementById('subjectDatasetDescription').value.trim()});
+        currentSubjectDataset=result; await loadSubjectDatasets(); await selectSubjectDataset(result.id,false); showSuccess('主体身份评测集已保存。');
+      }catch(err){showFailure(`保存失败：${err.message}`)}
+    }
+    async function deleteSubjectDataset(id) {
+      const item=subjectDatasets.find(row=>row.id===id); const name=item?.name||'该评测集';
+      if(!window.confirm(`确定删除主体身份评测集“${name}”吗？\n\n黄金标准和历史运行也会一并删除，此操作无法撤销。`))return;
+      try { const result=await post('/api/subject-eval/dataset/delete',{id}); if(currentSubjectDataset?.id===id)newSubjectDataset(); await loadSubjectDatasets(); showSuccess(`已删除“${result.name}”及 ${result.runCount} 次历史运行。`); }
+      catch(err){showFailure(`删除失败：${err.message}`)}
+    }
+    async function selectSubjectDataset(id,notify=true) {
+      try { currentSubjectDataset=await getJson(`/api/subject-eval/dataset?id=${encodeURIComponent(id)}`); currentSubjectRun=null;
+        document.getElementById('subjectDatasetName').value=currentSubjectDataset.name; document.getElementById('subjectDatasetVersion').value=currentSubjectDataset.version;
+        document.getElementById('subjectDatasetStatus').value=currentSubjectDataset.status; document.getElementById('subjectDatasetDescription').value=currentSubjectDataset.description||'';
+        document.getElementById('subjectNoDataset').classList.add('hide'); document.getElementById('subjectWorkspace').classList.remove('hide');
+        renderSubjectDatasetList(); renderSubjectGoldSummary(); renderSubjectRuns(); document.getElementById('subjectReport').innerHTML=''; document.getElementById('subjectReportEmpty').classList.remove('hide');
+        openSubjectSection(activeSubjectSection);
+        if(notify)showSuccess(`已载入：${currentSubjectDataset.name}`);
+      }catch(err){showFailure(`载入失败：${err.message}`)}
+    }
+    function renderSubjectGoldSummary() {
+      const gold=currentSubjectDataset?.gold||{}; const items=[['案件',gold.cases?.length||0],['文件分类',gold.files?.length||0],['职位记录',gold.records?.length||0],['任职分组',gold.groups?.length||0],['身份材料',gold.identities?.length||0],['业务规则',gold.rules?.length||0]];
+      document.getElementById('subjectGoldSummary').innerHTML=items.map(([label,value])=>`<div class="evidence-report-card">${label}<b>${value}</b></div>`).join('');
+      document.getElementById('subjectGoldStatus').textContent=`${currentSubjectDataset?.status==='frozen'?'已冻结；':''}共 ${items.reduce((sum,item)=>sum+item[1],0)} 条黄金数据`;
+    }
+    async function downloadSubjectTemplate() {
+      try { const result=await getJson('/api/subject-eval/template'); saveBase64File(result.base64,result.name); }
+      catch(err){showFailure(`模板下载失败：${err.message}`)}
+    }
+    async function importSubjectGold() {
+      const file=document.getElementById('subjectGoldFile').files[0]; if(!currentSubjectDataset||!file){showFailure('请先选择评测集和黄金标准Excel。');return;}
+      try { currentSubjectDataset=await post('/api/subject-eval/gold/import',{datasetId:currentSubjectDataset.id,excelUpload:{name:file.name,base64:await readBase64File(file)}}); renderSubjectGoldSummary(); await loadSubjectDatasets(); showSuccess('主体身份黄金标准导入成功。'); }
+      catch(err){showFailure(`导入失败：${err.message}`)}
+    }
+    function renderSubjectRuns() {
+      const wrap=document.getElementById('subjectRunList'); const runs=currentSubjectDataset?.runs||[];
+      wrap.innerHTML=runs.length?runs.map(run=>`<button onclick="loadSubjectRun('${run.id}')">${escapeHtml(run.name)}<span class="evidence-list-meta">${escapeHtml(run.createdAt)}｜职位F1 ${formatEvidencePct(run.summary?.recordExtraction?.f1)}</span></button>`).join(''):'<span class="status">暂无历史运行。</span>';
+    }
+    function subjectApiPayload(endpoint) { return {endpoint,baseUrl:document.getElementById('subjectApiBaseUrl').value.trim(),caseId:document.getElementById('subjectApiCaseId').value.trim(),bizId:document.getElementById('subjectApiBizId').value.trim()}; }
+    async function fetchSubjectProgress() {
+      const status=document.getElementById('subjectApiStatus'); status.textContent='正在查询阶段进度...';
+      try { const result=await post('/api/subject-eval/fetch',subjectApiPayload('progress')); const data=result.content?.data||{}; const tasks=data.tasks||data.taskStatuses||data.stages||[];
+        status.textContent=`当前：${data.currentTaskName||'未知'}（${data.currentTaskPosition||0}/${data.totalTasks||tasks.length||4}）${tasks.length?`｜${tasks.map(item=>`${item.stageName||item.name||item.stage||''}:${item.status||''}`).join('；')}`:''}`;
+      } catch(err){status.textContent=err.message;showFailure(`进度查询失败：${err.message}`)}
+    }
+    async function fetchSubjectIdentityResult() {
+      const status=document.getElementById('subjectApiStatus'); status.textContent='正在拉取 identity 结果...';
+      try { const result=await post('/api/subject-eval/fetch',subjectApiPayload('identity')); fetchedSubjectResult=result.content; status.textContent=`已拉取：${result.url}`; showSuccess('主体身份结果已拉取，可开始评测。'); }
+      catch(err){fetchedSubjectResult=null;status.textContent=err.message;showFailure(`结果拉取失败：${err.message}`)}
+    }
+    async function runSubjectEvaluation() {
+      const file=document.getElementById('subjectResultFile').files[0]; if(!currentSubjectDataset||(!file&&!fetchedSubjectResult)){showFailure('请先选择评测集，并上传系统输出JSON或拉取 identity 结果。');return;}
+      const status=document.getElementById('subjectRunStatus'); status.textContent='正在进行四阶段评测...';
+      try { const source=file?JSON.parse(await readTextFile(file)):fetchedSubjectResult; currentSubjectRun=await post('/api/subject-eval/evaluate',{datasetId:currentSubjectDataset.id,source,name:document.getElementById('subjectRunName').value.trim(),modelVersion:document.getElementById('subjectModelVersion').value.trim(),systemVersion:document.getElementById('subjectSystemVersion').value.trim(),threshold:Number(document.getElementById('subjectThreshold').value||.58)});
+        status.textContent=`评测完成：${currentSubjectRun.name}`; currentSubjectDataset=await getJson(`/api/subject-eval/dataset?id=${encodeURIComponent(currentSubjectDataset.id)}`); renderSubjectRuns(); renderSubjectReport(); renderSubjectStageReports(); openSubjectSection('report'); await loadSubjectDatasets(); showSuccess('主体身份分阶段评测完成。');
+      }catch(err){status.textContent=err.message;showFailure(`评测失败：${err.message}`)}
+    }
+    async function loadSubjectRun(id) { try{currentSubjectRun=await getJson(`/api/subject-eval/run?id=${encodeURIComponent(id)}`);renderSubjectReport();renderSubjectStageReports();openSubjectSection('report')}catch(err){showFailure(`读取运行失败：${err.message}`)} }
+    function renderSubjectReport() {
+      const wrap=document.getElementById('subjectReport'),empty=document.getElementById('subjectReportEmpty'); if(!currentSubjectRun){wrap.innerHTML='';empty.classList.remove('hide');return;} empty.classList.add('hide');
+      const s=currentSubjectRun.summary; const stages=[['文件分类',s.fileClassification],['职位抽取',s.recordExtraction],['任职对齐',s.alignment],['身份识别',s.identity]];
+      const fieldLabels={job:'职位名称',startDate:'开始时间',endDate:'结束时间',jobType:'职务类型',fileType:'文件类型',page:'页码'};
+      wrap.innerHTML=`<div class="evidence-actions"><h3 style="margin-right:auto">${escapeHtml(currentSubjectRun.name)}</h3><button class="secondary" onclick="exportSubjectRun()">导出Excel报告</button></div>
+      <div class="evidence-report-cards"><div class="evidence-report-card">文件分类F1<b>${formatEvidencePct(s.fileClassification.f1)}</b></div><div class="evidence-report-card">职位抽取F1<b>${formatEvidencePct(s.recordExtraction.f1)}</b></div><div class="evidence-report-card">分组准确率<b>${formatEvidencePct(s.alignment.groupAccuracy)}</b></div><div class="evidence-report-card">身份识别F1<b>${formatEvidencePct(s.identity.f1)}</b></div><div class="evidence-report-card">材料关联准确率<b>${formatEvidencePct(s.materialAccuracy)}</b></div><div class="evidence-report-card">业务规则通过率<b>${formatEvidencePct(s.businessRules.passRate)}</b></div></div>
+      <div class="evidence-table-wrap" style="max-height:none"><table><thead><tr><th>阶段</th><th>黄金数</th><th>模型数</th><th>匹配数</th><th>精确率</th><th>召回率</th><th>F1</th></tr></thead><tbody>${stages.map(([label,m])=>`<tr><td>${label}</td><td>${m.goldTotal}</td><td>${m.modelTotal}</td><td>${m.matched}</td><td>${formatEvidencePct(m.precision)}</td><td>${formatEvidencePct(m.recall)}</td><td>${formatEvidencePct(m.f1)}</td></tr>`).join('')}</tbody></table></div>
+      <h3 style="margin-top:16px">字段准确率</h3><div class="evidence-table-wrap" style="max-height:none"><table><thead><tr><th>字段</th><th>正确数</th><th>匹配数</th><th>准确率</th></tr></thead><tbody>${Object.entries(s.fields).map(([key,m])=>`<tr><td>${fieldLabels[key]||key}</td><td>${m.correct}</td><td>${m.total}</td><td>${formatEvidencePct(m.accuracy)}</td></tr>`).join('')}</tbody></table></div>
+      <h3 style="margin-top:16px">专项统计</h3><div class="evidence-report-cards"><div class="evidence-report-card">文件类型准确率<b>${formatEvidencePct(s.fileClassification.typeAccuracy)}</b></div><div class="evidence-report-card">错误拆分率<b>${formatEvidencePct(s.alignment.splitRate)}</b></div><div class="evidence-report-card">错误合并率<b>${formatEvidencePct(s.alignment.mergeRate)}</b></div><div class="evidence-report-card">规则通过/失败/未执行<b>${s.businessRules.passed}/${s.businessRules.failed}/${s.businessRules.notExecuted}</b></div></div>
+      <h3 style="margin-top:16px">错误分布</h3><div class="evidence-table-wrap" style="max-height:none"><table><thead><tr><th>阶段</th><th>匹配</th><th>漏检</th><th>误报</th></tr></thead><tbody>${[['文件分类','files'],['职位抽取','records'],['任职对齐','groups'],['身份识别','identities']].map(([label,key])=>{const rows=currentSubjectRun.details[key]||[];return `<tr><td>${label}</td><td>${rows.filter(row=>row.status==='matched').length}</td><td>${rows.filter(row=>row.status==='missed').length}</td><td>${rows.filter(row=>row.status==='false_positive').length}</td></tr>`}).join('')}</tbody></table></div>
+      <h3 style="margin-top:16px">业务规则明细</h3><div class="evidence-table-wrap"><table><thead><tr><th>规则编号</th><th>规则类型</th><th>预期结果</th><th>结论</th></tr></thead><tbody>${(currentSubjectRun.details.rules||[]).map(row=>`<tr><td>${escapeHtml(row.gold?.rule_id||'')}</td><td>${escapeHtml(row.gold?.rule_type||'')}</td><td>${escapeHtml(row.gold?.expected_result||'')}</td><td>${escapeHtml(row.verdict||'')}</td></tr>`).join('')||'<tr><td colspan="4">暂无业务规则</td></tr>'}</tbody></table></div>`;
+    }
+    function subjectStageMetric(label,m,extras='') {
+      return `<div class="evidence-report-cards"><div class="evidence-report-card">${label}精确率<b>${formatEvidencePct(m.precision)}</b></div><div class="evidence-report-card">${label}召回率<b>${formatEvidencePct(m.recall)}</b></div><div class="evidence-report-card">${label}F1<b>${formatEvidencePct(m.f1)}</b></div>${extras}</div>`;
+    }
+    function subjectStageDetails(rows, goldField, modelField) {
+      return `<div class="evidence-table-wrap"><table><thead><tr><th>状态</th><th>黄金标准</th><th>系统结果</th><th>匹配分</th></tr></thead><tbody>${(rows||[]).map(row=>`<tr><td>${escapeHtml(row.status||'')}</td><td>${escapeHtml(row.gold?.[goldField]||row.gold?.job||row.gold?.identity||'')}</td><td>${escapeHtml(row.model?.[modelField]||row.model?.job||row.model?.identity||'')}</td><td>${row.score??''}</td></tr>`).join('')||'<tr><td colspan="4">暂无明细</td></tr>'}</tbody></table></div>`;
+    }
+    function renderSubjectStageReports() {
+      const empty='<div class="evidence-empty">请先在“数据获取”完成一次评测。</div>';
+      for(const id of ['subjectFileReport','subjectRecordReport','subjectAlignReport','subjectMaterialReport','subjectRuleReport']) if(!currentSubjectRun) document.getElementById(id).innerHTML=empty;
+      if(!currentSubjectRun)return;
+      const s=currentSubjectRun.summary,d=currentSubjectRun.details;
+      const fileWarning=s.fileClassification.goldTotal>0&&s.fileClassification.modelTotal===0?'<div class="analysis-empty"><b>缺少第一阶段输出</b><p>当前JSON没有 fileClassifications，不能把接口未返回误认为分类模型准确率为0。请上传包含分类中间结果的离线JSON。</p></div>':'';
+      document.getElementById('subjectFileReport').innerHTML=fileWarning+subjectStageMetric('文件分类',s.fileClassification,`<div class="evidence-report-card">文件类型准确率<b>${formatEvidencePct(s.fileClassification.typeAccuracy)}</b></div>`)+subjectStageDetails(d.files,'file_name','fileName');
+      const fieldLabels={job:'职位名称',startDate:'开始时间',endDate:'结束时间',jobType:'职位类型',fileType:'文件类型',page:'页码'};
+      document.getElementById('subjectRecordReport').innerHTML=subjectStageMetric('职位抽取',s.recordExtraction)+`<div class="evidence-report-cards">${Object.entries(s.fields).map(([key,m])=>`<div class="evidence-report-card">${fieldLabels[key]||key}<b>${formatEvidencePct(m.accuracy)}（${m.correct}/${m.total}）</b></div>`).join('')}</div>`+subjectStageDetails(d.records,'job','job');
+      document.getElementById('subjectAlignReport').innerHTML=subjectStageMetric('任职对齐',s.alignment,`<div class="evidence-report-card">错误拆分率<b>${formatEvidencePct(s.alignment.splitRate)}</b></div><div class="evidence-report-card">错误合并率<b>${formatEvidencePct(s.alignment.mergeRate)}</b></div>`)+subjectStageDetails(d.groups,'job','job');
+      document.getElementById('subjectMaterialReport').innerHTML=subjectStageMetric('身份识别',s.identity,`<div class="evidence-report-card">材料关联准确率<b>${formatEvidencePct(s.materialAccuracy)}（${s.materialCorrect}/${s.materialTotal}）</b></div>`)+subjectStageDetails(d.identities,'identity','identity');
+      const rules=d.rules||[]; document.getElementById('subjectRuleReport').innerHTML=`<div class="evidence-report-cards"><div class="evidence-report-card">业务规则通过率<b>${formatEvidencePct(s.businessRules.passRate)}</b></div><div class="evidence-report-card">通过<b>${s.businessRules.passed}</b></div><div class="evidence-report-card">不通过<b>${s.businessRules.failed}</b></div><div class="evidence-report-card">未执行<b>${s.businessRules.notExecuted}</b></div></div><div class="evidence-table-wrap"><table><thead><tr><th>规则编号</th><th>规则类型</th><th>测试条件</th><th>预期结果</th><th>结论</th></tr></thead><tbody>${rules.map(row=>`<tr><td>${escapeHtml(row.gold?.rule_id||'')}</td><td>${escapeHtml(row.gold?.rule_type||'')}</td><td>${escapeHtml(row.gold?.input_description||'')}</td><td>${escapeHtml(row.gold?.expected_result||'')}</td><td>${escapeHtml(row.verdict||'')}</td></tr>`).join('')||'<tr><td colspan="5">暂无规则</td></tr>'}</tbody></table></div>`;
+    }
+    async function exportSubjectRun(){if(!currentSubjectRun)return;try{const result=await post('/api/subject-eval/export',{runId:currentSubjectRun.id});showSuccess(`主体身份报告已导出：${result.outputPath}`)}catch(err){showFailure(`导出失败：${err.message}`)}}
+    function openViolationSection(name) {
+      const sections=['gold','data','event','verbal','documentary','quality','review','report'];
+      activeViolationSection=sections.includes(name)?name:'gold'; localStorage.setItem('activeViolationSection',activeViolationSection);
+      if(activeVolume!=='evidence') setVolume('evidence'); else setModule('evidence');
+      const meta={gold:['黄金标准','管理事件、言证问题和书证问题黄金标准。'],data:['数据获取','上传系统结果JSON并保存当前评测运行。'],event:['事件抽取评测','查看事件严格/宽松指标及字段错误。'],verbal:['言证问题评测','评估言证问题发现、描述及主体归属。'],documentary:['书证问题评测','评估书证问题和关联材料判断。'],quality:['事件质量专项','集中分析主体、完整性、摘要、拆分、重复和合并。'],review:['人工匹配复核','集中确认或驳回自动匹配结果。'],report:['综合报告','汇总全部指标、错误分布和风险。']};
+      document.getElementById('violationSectionTitle').textContent=meta[activeViolationSection][0];
+      document.getElementById('violationSectionDescription').textContent=meta[activeViolationSection][1];
+      for(const section of sections){document.getElementById(`evidence${section[0].toUpperCase()+section.slice(1)}Pane`)?.classList.toggle('hide',section!==activeViolationSection);document.getElementById(`module-violation-${section}`)?.classList.toggle('active',section===activeViolationSection)}
+      renderViolationStageReports();
+    }
+    function updateViolationMenuStatus() {
+      const setStatus=(name,value)=>{const node=document.getElementById(`violation-status-${name}`);if(node)node.textContent=value};
+      const gold=currentEvidenceDataset?.gold||[], goldCount=gold.length;
+      setStatus('gold',goldCount?'已准备':'未准备');
+      if(!currentEvidenceDataset){
+        setStatus('data','未准备');
+        for(const name of ['event','verbal','documentary','quality'])setStatus(name,'待评测');
+        setStatus('review','未准备'); setStatus('report','未准备'); return;
+      }
+      if(!currentEvidenceRun){
+        setStatus('data',goldCount?'待评测':'待标注');
+        for(const name of ['event','verbal','documentary','quality'])setStatus(name,'待评测');
+        setStatus('review','未准备'); setStatus('report','未准备'); return;
+      }
+      setStatus('data','已完成');
+      const details=currentEvidenceRun.details||[], summary=currentEvidenceRun.summary||{};
+      const stageStatus=(kind,metric)=>{
+        const pending=details.filter(row=>(row.gold?.kind||row.model?.kind)===kind&&row.status==='matched'&&!row.reviewDecision).length;
+        if((metric?.goldTotal||0)>0&&(metric?.modelTotal||0)===0)return '缺少输出';
+        if(!(metric?.goldTotal||0)&&!(metric?.modelTotal||0))return '无数据';
+        return pending?`待复核 ${pending}`:'已完成';
+      };
+      setStatus('event',stageStatus('event',summary.event));
+      setStatus('verbal',stageStatus('verbal_issue',summary.verbalIssue));
+      setStatus('documentary',stageStatus('documentary_issue',summary.documentaryIssue));
+      setStatus('quality',(summary.event?.goldTotal||0)>0&&(summary.event?.modelTotal||0)===0?'缺少输出':((summary.event?.goldTotal||0)||(summary.event?.modelTotal||0)?'已完成':'无数据'));
+      const pending=details.filter(row=>row.status==='matched'&&!row.reviewDecision).length;
+      setStatus('review',pending?`待复核 ${pending}`:'已完成');
+      setStatus('report','已完成');
+    }
+    function setEvidenceDatasetCollapsed(collapsed) {
+      evidenceDatasetCollapsed = Boolean(collapsed);
+      localStorage.setItem('evidenceDatasetCollapsed', evidenceDatasetCollapsed ? '1' : '0');
+      document.getElementById('evidenceGrid')?.classList.toggle('dataset-collapsed', evidenceDatasetCollapsed);
+      document.getElementById('evidenceDatasetPanel')?.classList.toggle('collapsed', evidenceDatasetCollapsed);
+      const button = document.getElementById('evidenceCollapseButton');
+      if (button) {
+        button.textContent = evidenceDatasetCollapsed ? '›' : '‹';
+        button.title = evidenceDatasetCollapsed ? '展开评测集' : '收起评测集';
+        button.setAttribute('aria-label', button.title);
+      }
+    }
+    function toggleEvidenceDatasetPanel() {
+      setEvidenceDatasetCollapsed(!evidenceDatasetCollapsed);
+    }
+    function newEvidenceDataset() {
+      currentEvidenceDataset = null;
+      currentEvidenceRun = null;
+      document.getElementById('evidenceDatasetName').value = '';
+      document.getElementById('evidenceDatasetVersion').value = 'v1.0';
+      document.getElementById('evidenceDatasetStatus').value = 'draft';
+      document.getElementById('evidenceDatasetDescription').value = '';
+      document.getElementById('evidenceNoDataset').classList.remove('hide');
+      document.getElementById('evidenceWorkspace').classList.add('hide');
+      renderEvidenceDatasetList();
+      updateViolationMenuStatus();
+    }
+    async function loadEvidenceDatasets(notify=false) {
+      try {
+        evidenceDatasets = await getJson('/api/evidence/datasets');
+        renderEvidenceDatasetList();
+        if (currentEvidenceDataset?.id) {
+          const found = evidenceDatasets.find(item => item.id === currentEvidenceDataset.id);
+          if (found) await selectEvidenceDataset(found.id, false);
+        }
+        if (notify) showSuccess(`已刷新 ${evidenceDatasets.length} 个评测集。`);
+      } catch (err) {
+        showFailure(`读取评测集失败：${err.message}`);
+      }
+    }
+    function renderEvidenceDatasetList() {
+      const wrap = document.getElementById('evidenceDatasetList');
+      if (!wrap) return;
+      wrap.innerHTML = evidenceDatasets.length ? evidenceDatasets.map(item => `
+        <div class="evidence-list-card ${currentEvidenceDataset?.id === item.id ? 'active' : ''}">
+          <button class="evidence-list-item" onclick="selectEvidenceDataset('${item.id}')">
+            ${escapeHtml(item.name)} · ${escapeHtml(item.version)}
+            <span class="evidence-list-meta">${item.status === 'frozen' ? '已冻结' : '草稿'}｜标注 ${item.goldCount}｜运行 ${item.runCount}</span>
+          </button>
+          <button class="evidence-delete-button" title="删除评测集" aria-label="删除评测集 ${escapeHtml(item.name)}" onclick="deleteEvidenceDataset('${item.id}')">×</button>
+        </div>`).join('') : '<div class="status">还没有评测集。</div>';
+    }
+    async function deleteEvidenceDataset(id) {
+      const item = evidenceDatasets.find(row => row.id === id);
+      const displayName = item?.name || '该评测集';
+      if (!window.confirm(`确定删除评测集“${displayName}”吗？\n\n对应黄金标注和历史运行也会一并删除，此操作无法撤销。`)) return;
+      try {
+        const result = await post('/api/evidence/dataset/delete', {id});
+        if (currentEvidenceDataset?.id === id) newEvidenceDataset();
+        await loadEvidenceDatasets();
+        showSuccess(`已删除评测集“${result.name}”，同时删除 ${result.goldCount} 条标注和 ${result.runCount} 次运行。`);
+      } catch (err) { showFailure(`删除失败：${err.message}`); }
+    }
+    async function saveEvidenceDataset() {
+      try {
+        const result = await post('/api/evidence/dataset/save', {
+          id: currentEvidenceDataset?.id || '',
+          name: document.getElementById('evidenceDatasetName').value.trim(),
+          version: document.getElementById('evidenceDatasetVersion').value.trim(),
+          status: document.getElementById('evidenceDatasetStatus').value,
+          description: document.getElementById('evidenceDatasetDescription').value.trim(),
+        });
+        currentEvidenceDataset = result;
+        await loadEvidenceDatasets();
+        await selectEvidenceDataset(result.id, false);
+        showSuccess('评测集已保存。');
+      } catch (err) { showFailure(`保存失败：${err.message}`); }
+    }
+    async function selectEvidenceDataset(id, notify=true) {
+      try {
+        currentEvidenceDataset = await getJson(`/api/evidence/dataset?id=${encodeURIComponent(id)}`);
+        currentEvidenceRun = null;
+        document.getElementById('evidenceDatasetName').value = currentEvidenceDataset.name;
+        document.getElementById('evidenceDatasetVersion').value = currentEvidenceDataset.version;
+        document.getElementById('evidenceDatasetStatus').value = currentEvidenceDataset.status;
+        document.getElementById('evidenceDatasetDescription').value = currentEvidenceDataset.description || '';
+        document.getElementById('evidenceNoDataset').classList.add('hide');
+        document.getElementById('evidenceWorkspace').classList.remove('hide');
+        renderEvidenceDatasetList();
+        renderEvidenceGold();
+        renderEvidenceRuns();
+        document.getElementById('evidenceReport').innerHTML = '';
+        document.getElementById('evidenceReportEmpty').classList.remove('hide');
+        openViolationSection(activeViolationSection);
+        if (notify) showSuccess(`已载入评测集：${currentEvidenceDataset.name}`);
+      } catch (err) { showFailure(`载入失败：${err.message}`); }
+    }
+    function evidenceGoldRow(row={}) {
+      const relatedFilesValue = Array.isArray(row.relatedFiles)
+        ? row.relatedFiles.join('|')
+        : text(row.relatedFiles || '');
+      return `<tr data-id="${escapeHtml(row.id || '')}">
+        <td><select data-field="kind"><option value="event" ${row.kind === 'event' ? 'selected' : ''}>事件</option><option value="verbal_issue" ${row.kind === 'verbal_issue' ? 'selected' : ''}>言证问题</option><option value="documentary_issue" ${row.kind === 'documentary_issue' ? 'selected' : ''}>书证问题</option></select></td>
+        <td><input data-field="caseId" value="${escapeHtml(row.caseId || '')}"></td>
+        <td><input data-field="itemName" placeholder="材料名称" value="${escapeHtml(row.itemName || '')}"><input data-field="pageNo" placeholder="页码" value="${escapeHtml(row.pageNo || '')}"><input data-field="fileId" placeholder="file_id" value="${escapeHtml(row.fileId || '')}"><input data-field="itemId" placeholder="item_id" value="${escapeHtml(row.itemId || '')}"></td>
+        <td><input data-field="subject" value="${escapeHtml(row.subject || '')}"></td>
+        <td><input data-field="behavior" value="${escapeHtml(row.behavior || '')}"></td>
+        <td><input data-field="eventTime" placeholder="时间" value="${escapeHtml(row.eventTime || '')}"><input data-field="amount" placeholder="金额" value="${escapeHtml(row.amount || '')}"><input data-field="location" placeholder="地点" value="${escapeHtml(row.location || '')}"><input data-field="relatedObject" placeholder="关联对象" value="${escapeHtml(row.relatedObject || '')}"></td>
+        <td><textarea data-field="sourceText" placeholder="原始文本">${escapeHtml(row.sourceText || '')}</textarea><textarea data-field="evidenceText" placeholder="证据原文">${escapeHtml(row.evidenceText || '')}</textarea><textarea data-field="summary" placeholder="标准事件或问题">${escapeHtml(row.summary || '')}</textarea></td>
+        <td><input data-field="eventClusterId" placeholder="事件簇" value="${escapeHtml(row.eventClusterId || '')}"><select data-field="mergeRelation"><option value="">未设置</option>${['独立','应合并','不可合并','重复','嵌套'].map(value => `<option ${row.mergeRelation === value ? 'selected' : ''}>${value}</option>`).join('')}</select></td>
+        <td><input data-field="issueScene" placeholder="问题场景" value="${escapeHtml(row.issueScene || '')}"><select data-field="documentStatus"><option value="">书证状态</option>${['存在','缺失','无法判断'].map(value=>`<option ${row.documentStatus===value?'selected':''}>${value}</option>`).join('')}</select><input data-field="relatedFiles" placeholder="多个文件用 | 分隔" value="${escapeHtml(relatedFilesValue)}"><textarea data-field="expectedConclusion" placeholder="预期结论">${escapeHtml(row.expectedConclusion || '')}</textarea></td>
+        <td><input data-field="inputLimited" type="checkbox" ${row.inputLimited ? 'checked' : ''} style="width:auto"><textarea data-field="limitationReason" placeholder="匹配限制原因">${escapeHtml(row.limitationReason || '')}</textarea></td>
+        <td><select data-field="split">${['开发集','回归集','盲测集'].map(value => `<option ${row.split === value ? 'selected' : ''}>${value}</option>`).join('')}</select><select data-field="annotationStatus">${['初标','复核','仲裁','已确认'].map(value => `<option ${row.annotationStatus === value ? 'selected' : ''}>${value}</option>`).join('')}</select></td>
+        <td><textarea data-field="irrelevantInfo" placeholder="无关信息">${escapeHtml(row.irrelevantInfo || '')}</textarea><textarea data-field="notes" placeholder="备注">${escapeHtml(row.notes || '')}</textarea></td>
+        <td><button class="secondary" onclick="this.closest('tr').remove()">删除</button></td>
+      </tr>`;
+    }
+    function renderEvidenceGold() {
+      const body = document.getElementById('evidenceGoldRows');
+      if (!body) return;
+      body.innerHTML = (currentEvidenceDataset?.gold || []).map(evidenceGoldRow).join('');
+      if (!body.children.length) body.innerHTML = evidenceGoldRow({kind:'event', split:'开发集', annotationStatus:'初标'});
+      document.getElementById('evidenceGoldStatus').textContent = `共 ${currentEvidenceDataset?.gold?.length || 0} 条已保存标注${currentEvidenceDataset?.status === 'frozen' ? '；评测集已冻结' : ''}`;
+      updateViolationMenuStatus();
+    }
+    function addEvidenceGoldRow() {
+      document.getElementById('evidenceGoldRows').insertAdjacentHTML('beforeend', evidenceGoldRow({kind:'event', split:'开发集', annotationStatus:'初标'}));
+    }
+    function collectEvidenceGold() {
+      return [...document.querySelectorAll('#evidenceGoldRows tr')].map(tr => {
+        const row = {id: tr.dataset.id || ''};
+        tr.querySelectorAll('[data-field]').forEach(input => row[input.dataset.field] = input.type === 'checkbox' ? input.checked : input.value.trim());
+        return row;
+      });
+    }
+    async function saveEvidenceGold() {
+      if (!currentEvidenceDataset) return;
+      try {
+        currentEvidenceDataset = await post('/api/evidence/gold/save', {datasetId: currentEvidenceDataset.id, rows: collectEvidenceGold()});
+        renderEvidenceGold();
+        await loadEvidenceDatasets();
+        showSuccess(`已保存 ${currentEvidenceDataset.gold.length} 条黄金标注。`);
+      } catch (err) { showFailure(`保存标注失败：${err.message}`); }
+    }
+    async function importEvidenceGold() {
+      const file = document.getElementById('evidenceGoldFile').files[0];
+      if (!currentEvidenceDataset || !file) { showFailure('请先选择评测集和标注Excel。'); return; }
+      try {
+        currentEvidenceDataset = await post('/api/evidence/gold/import', {datasetId: currentEvidenceDataset.id, excelUpload:{name:file.name, base64:await readBase64File(file)}});
+        renderEvidenceGold();
+        await loadEvidenceDatasets();
+        showSuccess(`导入成功，共 ${currentEvidenceDataset.gold.length} 条标注。`);
+      } catch (err) { showFailure(`导入失败：${err.message}`); }
+    }
+    function saveBase64File(base64Value, name) {
+      const binary = atob(base64Value); const bytes = new Uint8Array(binary.length);
+      for (let i=0; i<binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([bytes])); link.download = name;
+      document.body.appendChild(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    }
+    async function downloadEvidenceTemplate() {
+      try { const result = await getJson('/api/evidence/template'); saveBase64File(result.base64, result.name); }
+      catch (err) { showFailure(`模板下载失败：${err.message}`); }
+    }
+    function renderEvidenceRuns() {
+      const wrap = document.getElementById('evidenceRunList');
+      const runs = currentEvidenceDataset?.runs || [];
+      wrap.innerHTML = runs.length ? runs.map(run => `<button onclick="loadEvidenceRun('${run.id}')">${escapeHtml(run.name)}<span class="evidence-list-meta">${escapeHtml(run.createdAt)}｜事件F1 ${formatEvidencePct(run.summary?.event?.f1)}</span></button>`).join('') : '<span class="status">暂无历史运行。</span>';
+    }
+    async function runEvidenceEvaluation() {
+      const file = document.getElementById('evidenceResultFile').files[0];
+      if (!currentEvidenceDataset || !file) { showFailure('请先选择评测集并上传系统输出JSON。'); return; }
+      const status = document.getElementById('evidenceRunStatus'); status.textContent = '正在评测...';
+      try {
+        const source = JSON.parse(await readTextFile(file));
+        currentEvidenceRun = await post('/api/evidence/evaluate', {
+          datasetId: currentEvidenceDataset.id, source,
+          name: document.getElementById('evidenceRunName').value.trim(),
+          modelVersion: document.getElementById('evidenceModelVersion').value.trim(),
+          promptVersion: document.getElementById('evidencePromptVersion').value.trim(),
+          systemVersion: document.getElementById('evidenceSystemVersion').value.trim(),
+          threshold: Number(document.getElementById('evidenceThreshold').value || 0.58),
+        });
+        status.textContent = `评测完成：${currentEvidenceRun.name}`;
+        currentEvidenceDataset = await getJson(`/api/evidence/dataset?id=${encodeURIComponent(currentEvidenceDataset.id)}`);
+        renderEvidenceRuns(); renderEvidenceReport(); renderViolationStageReports(); openViolationSection('report'); await loadEvidenceDatasets();
+        showSuccess('离线评测完成。');
+      } catch (err) { status.textContent = err.message; showFailure(`评测失败：${err.message}`); }
+    }
+    async function loadEvidenceRun(id) {
+      try { currentEvidenceRun = await getJson(`/api/evidence/run?id=${encodeURIComponent(id)}`); renderEvidenceReport(); renderViolationStageReports(); openViolationSection('report'); }
+      catch (err) { showFailure(`读取评测记录失败：${err.message}`); }
+    }
+    function formatEvidencePct(value) { return `${(Number(value || 0) * 100).toFixed(2)}%`; }
+    function violationMetricCards(label, metric, extras='') {
+      return `<div class="evidence-report-cards"><div class="evidence-report-card">${label}精确率<b>${formatEvidencePct(metric.precision)}</b></div><div class="evidence-report-card">${label}召回率<b>${formatEvidencePct(metric.recall)}</b></div><div class="evidence-report-card">${label}F1<b>${formatEvidencePct(metric.f1)}</b></div><div class="evidence-report-card">严格匹配<b>${metric.strictMatched}/${metric.goldTotal}</b></div>${extras}</div>`;
+    }
+    function violationDetailTable(rows, allowReview=false) {
+      return `<div class="evidence-table-wrap"><table><thead><tr><th>状态</th><th>案件/材料</th><th>黄金答案</th><th>系统答案</th><th>匹配分</th>${allowReview?'<th>人工复核</th>':''}</tr></thead><tbody>${rows.map(row=>{const index=currentEvidenceRun.details.indexOf(row);return `<tr><td>${escapeHtml(row.reviewDecision==='reject'?'人工驳回匹配':row.status)}</td><td>${escapeHtml(row.gold?.caseId||'')} / ${escapeHtml(row.gold?.itemName||row.model?.itemName||'')}</td><td>${escapeHtml(row.gold?.summary||'')}</td><td>${escapeHtml(row.model?.summary||'')}</td><td>${row.score??''}</td>${allowReview?`<td>${row.status==='matched'?`<select onchange="saveEvidenceReview(${index},this.value)"><option value="" ${!row.reviewDecision?'selected':''}>未复核</option><option value="accept" ${row.reviewDecision==='accept'?'selected':''}>确认匹配</option><option value="reject" ${row.reviewDecision==='reject'?'selected':''}>驳回匹配</option></select>`:'-'}</td>`:''}</tr>`}).join('')||`<tr><td colspan="${allowReview?6:5}">暂无结果</td></tr>`}</tbody></table></div>`;
+    }
+    function renderViolationStageReports() {
+      const empty='<div class="evidence-empty">请先在“数据获取”完成一次评测。</div>';
+      for(const id of ['violationEventReport','violationVerbalReport','violationDocumentaryReport','violationQualityReport','violationReviewReport']) if(!currentEvidenceRun) document.getElementById(id).innerHTML=empty;
+      updateViolationMenuStatus();
+      if(!currentEvidenceRun)return;
+      const s=currentEvidenceRun.summary,details=currentEvidenceRun.details||[];
+      const rowsFor=kind=>details.filter(row=>(row.gold?.kind||row.model?.kind)===kind);
+      const eventRows=rowsFor('event'),verbalRows=rowsFor('verbal_issue'),documentRows=rowsFor('documentary_issue');
+      const fieldLabels={subject:'主体',behavior:'行为',eventTime:'时间',amount:'金额',location:'地点',relatedObject:'关联对象'};
+      document.getElementById('violationEventReport').innerHTML=violationMetricCards('事件抽取',s.event)+`<h3>字段准确率</h3><div class="evidence-report-cards">${Object.entries(s.eventFields||{}).map(([key,m])=>`<div class="evidence-report-card">${fieldLabels[key]||key}<b>${formatEvidencePct(m.accuracy)}（${m.correct}/${m.total}）</b></div>`).join('')}</div>`+violationDetailTable(eventRows);
+      document.getElementById('violationVerbalReport').innerHTML=violationMetricCards('言证问题',s.verbalIssue,`<div class="evidence-report-card">描述正确率<b>${formatEvidencePct(s.verbalDescriptionAccuracy)}</b></div><div class="evidence-report-card">主体归属正确率<b>${formatEvidencePct(s.subjectAccuracy)}</b></div>`)+violationDetailTable(verbalRows);
+      document.getElementById('violationDocumentaryReport').innerHTML=violationMetricCards('书证问题',s.documentaryIssue,`<div class="evidence-report-card">书证关联准确率<b>${formatEvidencePct(s.documentaryRelationAccuracy)}</b></div><div class="evidence-report-card">输入范围受限<b>${s.inputLimited}</b></div>`)+violationDetailTable(documentRows);
+      document.getElementById('violationQualityReport').innerHTML=`<div class="evidence-report-cards"><div class="evidence-report-card">主体归属正确率<b>${formatEvidencePct(s.subjectAccuracy)}</b></div><div class="evidence-report-card">事件完整率<b>${formatEvidencePct(s.eventCompleteness)}</b></div><div class="evidence-report-card">摘要合格率<b>${formatEvidencePct(s.summaryQualifiedRate)}</b></div><div class="evidence-report-card">无关信息率<b>${formatEvidencePct(s.irrelevantInfoRate)}</b></div><div class="evidence-report-card">事件重复率<b>${formatEvidencePct(s.duplicateRate)}</b></div><div class="evidence-report-card">事件拆分率<b>${formatEvidencePct(s.splitRate)}</b></div><div class="evidence-report-card">事件合并准确率<b>${formatEvidencePct(s.mergeAccuracy)}（${s.mergeGroupTotal}组）</b></div></div>${violationDetailTable(eventRows)}`;
+      const pending=details.filter(row=>row.status==='matched'&&!row.reviewDecision), accepted=details.filter(row=>row.reviewDecision==='accept'), rejected=details.filter(row=>row.reviewDecision==='reject');
+      document.getElementById('violationReviewReport').innerHTML=`<div class="evidence-report-cards"><div class="evidence-report-card">待复核<b>${pending.length}</b></div><div class="evidence-report-card">已确认<b>${accepted.length}</b></div><div class="evidence-report-card">已驳回<b>${rejected.length}</b></div><div class="evidence-report-card">低置信待复核<b>${s.reviewRequired}</b></div></div>${violationDetailTable(details,true)}`;
+      updateViolationMenuStatus();
+    }
+    function renderEvidenceReport() {
+      const wrap = document.getElementById('evidenceReport');
+      const empty = document.getElementById('evidenceReportEmpty');
+      if (!currentEvidenceRun) { wrap.innerHTML=''; empty.classList.remove('hide'); return; }
+      empty.classList.add('hide');
+      const s=currentEvidenceRun.summary;
+      const metricRows=[['事件抽取',s.event],['言证问题',s.verbalIssue],['书证问题',s.documentaryIssue]];
+      wrap.innerHTML=`<div class="evidence-actions"><h3 style="margin-right:auto">${escapeHtml(currentEvidenceRun.name)}</h3><button class="secondary" onclick="exportEvidenceRun()">导出Excel报告</button></div>
+        <div class="evidence-report-cards"><div class="evidence-report-card">主体归属正确率<b>${formatEvidencePct(s.subjectAccuracy)}</b></div><div class="evidence-report-card">事件完整率<b>${formatEvidencePct(s.eventCompleteness)}</b></div><div class="evidence-report-card">摘要合格率<b>${formatEvidencePct(s.summaryQualifiedRate)}</b></div><div class="evidence-report-card">事件重复率<b>${formatEvidencePct(s.duplicateRate)}</b></div><div class="evidence-report-card">事件拆分率<b>${formatEvidencePct(s.splitRate)}</b></div><div class="evidence-report-card">事件合并准确率<b>${formatEvidencePct(s.mergeAccuracy)}</b></div><div class="evidence-report-card">无关信息率<b>${formatEvidencePct(s.irrelevantInfoRate)}</b></div><div class="evidence-report-card">待复核 / 输入受限<b>${s.reviewRequired} / ${s.inputLimited}</b></div></div>
+        <div class="evidence-table-wrap" style="max-height:none"><table><thead><tr><th>评测对象</th><th>黄金数</th><th>模型数</th><th>宽松匹配</th><th>严格匹配</th><th>精确率</th><th>召回率</th><th>F1</th></tr></thead><tbody>${metricRows.map(([label,m])=>`<tr><td>${label}</td><td>${m.goldTotal}</td><td>${m.modelTotal}</td><td>${m.matched}</td><td>${m.strictMatched}</td><td>${formatEvidencePct(m.precision)}</td><td>${formatEvidencePct(m.recall)}</td><td>${formatEvidencePct(m.f1)}</td></tr>`).join('')}</tbody></table></div>
+        <h3 style="margin-top:16px">错误与匹配明细</h3><div class="evidence-table-wrap"><table><thead><tr><th>状态</th><th>类型</th><th>黄金答案</th><th>系统答案</th><th>匹配分</th><th>严格</th><th>人工复核</th></tr></thead><tbody>${currentEvidenceRun.details.map((row,index)=>`<tr><td>${escapeHtml(row.reviewDecision === 'reject' ? '人工驳回匹配' : row.status)}</td><td>${escapeHtml(row.gold?.kind || row.model?.kind || '')}</td><td>${escapeHtml(row.gold?.summary || '')}</td><td>${escapeHtml(row.model?.summary || '')}</td><td>${row.score ?? ''}</td><td>${row.strict ? '是':'否'}</td><td>${row.status === 'matched' ? `<select onchange="saveEvidenceReview(${index},this.value)"><option value="" ${!row.reviewDecision ? 'selected':''}>未复核</option><option value="accept" ${row.reviewDecision === 'accept' ? 'selected':''}>确认匹配</option><option value="reject" ${row.reviewDecision === 'reject' ? 'selected':''}>驳回匹配</option></select>` : '-'}</td></tr>`).join('')}</tbody></table></div>`;
+    }
+    async function saveEvidenceReview(index, decision) {
+      if (!currentEvidenceRun) return;
+      try {
+        currentEvidenceRun = await post('/api/evidence/review', {runId:currentEvidenceRun.id, decisions:{[index]:decision}});
+        renderEvidenceReport();
+        renderViolationStageReports();
+        if (currentEvidenceDataset) currentEvidenceDataset = await getJson(`/api/evidence/dataset?id=${encodeURIComponent(currentEvidenceDataset.id)}`);
+        renderEvidenceRuns();
+        showSuccess('人工复核结论已保存，指标已重新计算。');
+      } catch(err) { showFailure(`复核保存失败：${err.message}`); }
+    }
+    async function exportEvidenceRun() {
+      if (!currentEvidenceRun) return;
+      try { const result=await post('/api/evidence/export',{runId:currentEvidenceRun.id}); showSuccess(`报告已导出：${result.outputPath}`); }
+      catch(err){ showFailure(`导出失败：${err.message}`); }
+    }
     loadHistoryList();
   </script>
 </body>
@@ -5999,6 +6621,42 @@ class ToolHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/evidence/datasets":
+            self.send_json(EVIDENCE_EVALUATION.list_datasets())
+            return
+        if parsed.path == "/api/subject-eval/datasets":
+            self.send_json(SUBJECT_IDENTITY_EVALUATION.list_datasets())
+            return
+        if parsed.path == "/api/subject-eval/dataset":
+            query = urllib.parse.parse_qs(parsed.query)
+            try: self.send_json(SUBJECT_IDENTITY_EVALUATION.get_dataset(query.get("id", [""])[0]))
+            except ValueError as exc: self.send_json({"error": str(exc)}, 404)
+            return
+        if parsed.path == "/api/subject-eval/run":
+            query = urllib.parse.parse_qs(parsed.query)
+            try: self.send_json(SUBJECT_IDENTITY_EVALUATION.get_run(query.get("id", [""])[0]))
+            except ValueError as exc: self.send_json({"error": str(exc)}, 404)
+            return
+        if parsed.path == "/api/subject-eval/template":
+            self.send_json({"name": "主体身份卷黄金标准标注模板.xlsx", "base64": SUBJECT_IDENTITY_EVALUATION.template()})
+            return
+        if parsed.path == "/api/evidence/dataset":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                self.send_json(EVIDENCE_EVALUATION.get_dataset(query.get("id", [""])[0]))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 404)
+            return
+        if parsed.path == "/api/evidence/run":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                self.send_json(EVIDENCE_EVALUATION.get_run(query.get("id", [""])[0]))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 404)
+            return
+        if parsed.path == "/api/evidence/template":
+            self.send_json({"name": "违纪违法卷言证书证黄金标准标注模板.xlsx", "base64": EVIDENCE_EVALUATION.template()})
+            return
         if parsed.path == "/api/history":
             self.send_json(refreshed_history_index())
             return
@@ -6080,6 +6738,40 @@ class ToolHandler(BaseHTTPRequestHandler):
                 excel_path = UPLOAD_DIR / f"{stamp}-annotation-{excel_filename}"
                 excel_path.write_bytes(base64.b64decode(excel_upload["base64"]))
                 self.send_json(load_rule_annotation_workbook(excel_path))
+            elif self.path == "/api/evidence/dataset/save":
+                self.send_json(EVIDENCE_EVALUATION.save_dataset(payload))
+            elif self.path == "/api/evidence/dataset/delete":
+                self.send_json(EVIDENCE_EVALUATION.delete_dataset(payload.get("id") or ""))
+            elif self.path == "/api/evidence/gold/save":
+                self.send_json(EVIDENCE_EVALUATION.save_gold(payload.get("datasetId") or "", payload.get("rows") or []))
+            elif self.path == "/api/evidence/gold/import":
+                upload = payload.get("excelUpload") or {}
+                if not upload.get("base64"):
+                    raise ValueError("请先上传黄金标注Excel。")
+                self.send_json(EVIDENCE_EVALUATION.import_gold_excel(payload.get("datasetId") or "", upload["base64"]))
+            elif self.path == "/api/evidence/evaluate":
+                self.send_json(EVIDENCE_EVALUATION.run(payload))
+            elif self.path == "/api/evidence/review":
+                self.send_json(EVIDENCE_EVALUATION.review_run(payload.get("runId") or "", payload.get("decisions") or {}))
+            elif self.path == "/api/evidence/export":
+                output_path = EVIDENCE_EVALUATION.export_run(payload.get("runId") or "")
+                self.send_json({"outputPath": str(output_path)})
+            elif self.path == "/api/subject-eval/dataset/save":
+                self.send_json(SUBJECT_IDENTITY_EVALUATION.save_dataset(payload))
+            elif self.path == "/api/subject-eval/dataset/delete":
+                self.send_json(SUBJECT_IDENTITY_EVALUATION.delete_dataset(payload.get("id") or ""))
+            elif self.path == "/api/subject-eval/gold/import":
+                upload = payload.get("excelUpload") or {}
+                if not upload.get("base64"): raise ValueError("请先上传主体身份黄金标准Excel。")
+                self.send_json(SUBJECT_IDENTITY_EVALUATION.import_gold(payload.get("datasetId") or "", upload["base64"]))
+            elif self.path == "/api/subject-eval/evaluate":
+                self.send_json(SUBJECT_IDENTITY_EVALUATION.run(payload))
+            elif self.path == "/api/subject-eval/fetch":
+                endpoint = payload.get("endpoint") or "identity"
+                if endpoint not in {"identity", "progress"}: raise ValueError("不支持的主体身份接口。")
+                self.send_json(SUBJECT_IDENTITY_EVALUATION.fetch_api(payload.get("baseUrl") or "", endpoint, payload.get("caseId") or "", payload.get("bizId") or ""))
+            elif self.path == "/api/subject-eval/export":
+                self.send_json({"outputPath": str(SUBJECT_IDENTITY_EVALUATION.export_run(payload.get("runId") or ""))})
             elif self.path == "/api/rules/export":
                 excel_path = safe_uploaded_excel_path(payload.get("sourcePath"))
                 output_path = export_rule_annotation_workbook(
